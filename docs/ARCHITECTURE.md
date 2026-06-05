@@ -12,6 +12,91 @@ The audit engine should not depend on pi-coding-agent. This keeps batch runs, CI
 
 ## Pipeline
 
+```mermaid
+flowchart TD
+  subgraph Entry["Entry Points"]
+    CLI["CLI: fsa run"]
+    PI["pi extension: fsa_run_audit"]
+    LIB["Library API: runPipeline"]
+  end
+
+  subgraph Inputs["Authorized Inputs"]
+    SRC["Source files and directories"]
+    CORPUS["Specs, docs, papers, references"]
+    CFG["Project context, lens packs, custom agents"]
+  end
+
+  subgraph Engine["Audit Engine"]
+    INGEST["Ingest and path sanitization"]
+    INDEX["SourceIndex and structural retrieval"]
+    PROFILE["Deterministic project profile"]
+    LENS["Model reconnaissance and dynamic lens packs"]
+    ENUM["Model checklist enumeration"]
+    ROUND1["Round 1 checklist"]
+    AUDIT1["Specialized audit trials"]
+    DEEPEN["Round 2+ deepening agent"]
+    DELTA["Novel checklist delta"]
+    AUDITN["Audit trials for new items"]
+    AGG["Aggregation and ranking"]
+    VERIFY["Skeptical local-only verification"]
+    REPORT["Private disclosure drafts"]
+  end
+
+  subgraph Providers["Model Providers"]
+    PIAI["pi-ai providers"]
+    CODEX["codex-cli fallback"]
+    MOCK["Mock LLM for CI"]
+  end
+
+  subgraph Safety["Safety and Hygiene"]
+    POLICY["Command safety policy"]
+    PUBLIC["Public-surface scan"]
+    TRACE["Events, calls, and artifacts"]
+  end
+
+  CLI --> INGEST
+  PI --> INGEST
+  LIB --> INGEST
+  SRC --> INGEST
+  CORPUS --> INGEST
+  CFG --> PROFILE
+  CFG --> LENS
+  CFG --> ENUM
+  INGEST --> INDEX
+  INGEST --> PROFILE
+  INDEX --> LENS
+  PROFILE --> LENS
+  LENS --> ENUM
+  INDEX --> ENUM
+  ENUM --> ROUND1
+  ROUND1 --> AUDIT1
+  AUDIT1 --> AGG
+  AUDIT1 --> DEEPEN
+  DEEPEN --> DELTA
+  DELTA --> AUDITN
+  AUDITN --> AGG
+  AGG --> VERIFY
+  VERIFY --> REPORT
+  PIAI -. default .-> LENS
+  PIAI -. default .-> ENUM
+  PIAI -. default .-> AUDIT1
+  PIAI -. default .-> DEEPEN
+  PIAI -. default .-> VERIFY
+  CODEX -. explicit fallback .-> LENS
+  CODEX -. explicit fallback .-> ENUM
+  CODEX -. explicit fallback .-> AUDIT1
+  CODEX -. explicit fallback .-> DEEPEN
+  CODEX -. explicit fallback .-> VERIFY
+  MOCK -. tests .-> LENS
+  MOCK -. tests .-> ENUM
+  MOCK -. tests .-> AUDIT1
+  PI --> POLICY
+  REPORT --> TRACE
+  AGG --> TRACE
+  VERIFY --> TRACE
+  PUBLIC --> TRACE
+```
+
 ```text
 source + corpus
   -> ingest
