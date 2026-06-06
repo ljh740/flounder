@@ -48,8 +48,43 @@ export function dedupeAuditItems(items: AuditItem[]): AuditItem[] {
   return out.map((item, idx) => ({ ...item, id: item.id || `item-${idx}` }));
 }
 
+export function selectDiverseAuditItems(items: AuditItem[], maxItems: number | undefined): AuditItem[] {
+  if (typeof maxItems !== "number" || !Number.isFinite(maxItems) || maxItems < 1) return items;
+  const limit = Math.floor(maxItems);
+  if (items.length <= limit) return items;
+
+  const buckets = new Map<string, AuditItem[]>();
+  const bucketOrder: string[] = [];
+  for (const item of items) {
+    const bucket = auditItemDiversityBucket(item);
+    if (!buckets.has(bucket)) {
+      buckets.set(bucket, []);
+      bucketOrder.push(bucket);
+    }
+    buckets.get(bucket)?.push(item);
+  }
+
+  const out: AuditItem[] = [];
+  while (out.length < limit && buckets.size > 0) {
+    for (const bucket of [...bucketOrder]) {
+      const queued = buckets.get(bucket);
+      if (!queued) continue;
+      const next = queued.shift();
+      if (next) out.push(next);
+      if (queued.length === 0) buckets.delete(bucket);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
 export function auditItemKey(item: Pick<AuditItem, "location" | "failureMode" | "securityProperty">): string {
   return [item.location, item.failureMode, item.securityProperty].map(canonicalText).join("|");
+}
+
+export function auditItemDiversityBucket(item: Pick<AuditItem, "location">): string {
+  const firstLocation = item.location.split(/[;,]/)[0]?.trim() ?? item.location;
+  return firstLocation.replace(/:\d+(?:-\d+)?(?:\s*)$/, "").trim() || "unknown";
 }
 
 function canonicalText(input: string): string {

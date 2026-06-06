@@ -246,7 +246,7 @@ Options:
   --max-new-items-per-round <n>
                           cap new deepening items per round, default 16
   --trials <n>            independent trials per item, default 4
-  --max-items <n>         cap enumerated audit items for cost-controlled runs
+  --max-items <n>         cap total audit items across rounds for cost-controlled runs
   --thinking <level>      minimal|low|medium|high|xhigh
   --context-chars <n>     character budget per audit item context
   --retrieval <name>      source-index|source-index+qmd, default source-index

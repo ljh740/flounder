@@ -22,7 +22,7 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
       explorationStrategy: Type.Optional(Type.String({ description: "Deepening strategy for later rounds: breadth, depth, or hybrid." })),
       maxNewItemsPerRound: Type.Optional(Type.Number({ description: "Cap new deepening items per round." })),
       trials: Type.Optional(Type.Number({ description: "Independent audit trials per item." })),
-      maxAuditItems: Type.Optional(Type.Number({ description: "Optional cap on enumerated audit items for cost-controlled runs." })),
+      maxAuditItems: Type.Optional(Type.Number({ description: "Optional cap on total audit items across rounds for cost-controlled runs." })),
       contextRetrieval: Type.Optional(Type.String({ description: "Context retrieval mode: source-index or source-index+qmd." })),
       qmdCommand: Type.Optional(Type.String({ description: "QMD CLI command when contextRetrieval is source-index+qmd." })),
       qmdLimit: Type.Optional(Type.Number({ description: "Maximum QMD hits per audit item." })),

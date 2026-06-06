@@ -9,7 +9,7 @@ import { runSeeders } from "./seeders/index.js";
 import type { AuditItem, Doc, LlmClient, ProjectLearning, ProjectProfile } from "./types.js";
 import { extractJsonArray } from "./util/json.js";
 import type { RunLogger } from "./trace/logger.js";
-import { dedupeAuditItems, normalizeAuditItem, type RawAuditItem } from "./items.js";
+import { dedupeAuditItems, normalizeAuditItem, selectDiverseAuditItems, type RawAuditItem } from "./items.js";
 
 export async function enumerateAuditItems(input: {
   cfg: AuditorConfig;
@@ -53,10 +53,13 @@ export async function enumerateAuditItems(input: {
 
   const llmItems = extractJsonArray<RawAuditItem>(text).map((item) => normalizeAuditItem(item, round)).filter((item): item is AuditItem => item !== undefined);
   const deduped = dedupeAuditItems([...seeded, ...llmItems]);
-  const all = limitItems(deduped, input.cfg.maxAuditItems);
+  const roundOneBudget = initialEnumerationBudget(input.cfg);
+  const all = selectDiverseAuditItems(deduped, roundOneBudget);
   if (all.length < deduped.length) {
     await input.logger.event("enumeration_limited", {
       maxAuditItems: input.cfg.maxAuditItems,
+      roundOneBudget,
+      reservedForLaterRounds: reservedForLaterRounds(input.cfg),
       before: deduped.length,
       after: all.length,
     });
@@ -66,7 +69,20 @@ export async function enumerateAuditItems(input: {
   return all;
 }
 
-function limitItems(items: AuditItem[], maxAuditItems: number | undefined): AuditItem[] {
-  if (typeof maxAuditItems !== "number" || !Number.isFinite(maxAuditItems) || maxAuditItems < 1) return items;
-  return items.slice(0, Math.floor(maxAuditItems));
+function initialEnumerationBudget(cfg: Pick<AuditorConfig, "maxAuditItems" | "rounds" | "maxNewItemsPerRound">): number | undefined {
+  if (typeof cfg.maxAuditItems !== "number" || !Number.isFinite(cfg.maxAuditItems) || cfg.maxAuditItems < 1) return undefined;
+  const maxAuditItems = Math.floor(cfg.maxAuditItems);
+  const rounds = Math.max(1, Math.floor(cfg.rounds));
+  if (rounds <= 1) return maxAuditItems;
+  const reserved = reservedForLaterRounds(cfg);
+  return Math.max(1, maxAuditItems - reserved);
+}
+
+function reservedForLaterRounds(cfg: Pick<AuditorConfig, "maxAuditItems" | "rounds" | "maxNewItemsPerRound">): number {
+  if (typeof cfg.maxAuditItems !== "number" || !Number.isFinite(cfg.maxAuditItems) || cfg.maxAuditItems < 1) return 0;
+  const maxAuditItems = Math.floor(cfg.maxAuditItems);
+  const rounds = Math.max(1, Math.floor(cfg.rounds));
+  const perRound = Math.max(1, Math.floor(cfg.maxNewItemsPerRound));
+  const laterCapacity = Math.max(0, rounds - 1) * perRound;
+  return Math.min(maxAuditItems - 1, laterCapacity);
 }

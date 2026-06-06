@@ -169,6 +169,33 @@ test("multi-round mode deepens with novel follow-up checklist items", async () =
   await stat(path.join(result.runDir, "round_2_audit_results.json"));
 });
 
+test("multi-round item cap reserves budget for follow-up exploration", async () => {
+  const out = await mkdtemp(path.join(os.tmpdir(), "fsa-budgeted-rounds-"));
+  const cfg = defaultConfig();
+  cfg.targetName = "test-budgeted-rounds";
+  cfg.sourcePaths = [fixtures];
+  cfg.outputDir = out;
+  cfg.trials = 1;
+  cfg.rounds = 2;
+  cfg.maxAuditItems = 3;
+  cfg.maxNewItemsPerRound = 1;
+  cfg.localChecklistSeeders = false;
+
+  const result = await runPipeline(cfg, { llm: new BudgetedRoundsLlmClient(), verifyTopK: 0 });
+  assert.equal(result.summary.coverage.itemsTotal, 3);
+
+  const checklist = JSON.parse(await readFile(path.join(result.runDir, "checklist.json"), "utf8"));
+  assert.deepEqual(checklist.map((item) => item.round), [1, 1, 2]);
+  assert.equal(checklist.at(-1).id, "budget-round-2-follow-up");
+
+  const deepening = JSON.parse(await readFile(path.join(result.runDir, "round_2_deepening_items.json"), "utf8"));
+  assert.equal(deepening.accepted.length, 1);
+
+  const events = await readFile(path.join(result.runDir, "events.jsonl"), "utf8");
+  assert.match(events, /"kind":"deepening_done"/);
+  assert.doesNotMatch(events, /max_audit_items_reached/);
+});
+
 test("breadth strategy uses only breadth deepening budget", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-breadth-"));
   const cfg = defaultConfig();
@@ -331,6 +358,61 @@ test("resume mode retries model-error items from the same round", async () => {
   assert.equal(resumeState.completedRounds, 1);
   assert.equal(resumeState.pendingRoundItems, 1);
 });
+
+class BudgetedRoundsLlmClient {
+  async complete(input) {
+    if (input.tag === "learn_project") {
+      return JSON.stringify({
+        scopeSummary: "Budgeted round regression target.",
+        securityObjectives: ["Model-produced checklist items must leave room for follow-up exploration."],
+        domainConcepts: ["checked assignment"],
+        trustBoundaries: ["private witness values"],
+        attackerCapabilities: ["choose private inputs"],
+        candidateInvariants: ["checked logic must bind values to their intended source"],
+        implementationMechanics: ["fixtures contain small circuit-like code"],
+        uncertainty: [],
+        evidenceRefs: ["fixtures"],
+      });
+    }
+    if (input.tag === "discover_lenses") {
+      return JSON.stringify([]);
+    }
+    if (input.tag === "enumerate") {
+      return JSON.stringify([
+        budgetItem("budget-add-1", "fixtures/halo2_missing_constraint.rs:5"),
+        budgetItem("budget-add-2", "fixtures/halo2_missing_constraint.rs:6"),
+        budgetItem("budget-mul-1", "fixtures/halo2_scalar_mul_binding.rs:13"),
+        budgetItem("budget-mul-2", "fixtures/halo2_scalar_mul_binding.rs:14"),
+      ]);
+    }
+    if (input.tag === "deepen_round_2_breadth") {
+      return JSON.stringify([budgetItem("budget-round-2-follow-up", "fixtures/halo2_scalar_mul_binding.rs:13-14")]);
+    }
+    if (input.tag.startsWith("audit_")) {
+      return JSON.stringify({
+        finding: false,
+        title: "No finding",
+        severity: "info",
+        confidence: 0.5,
+        description: "Budget regression test response.",
+        evidence: "No security claim is made by this fixture client.",
+        exploitSketch: "",
+        fix: "",
+      });
+    }
+    return "";
+  }
+}
+
+function budgetItem(id, location) {
+  return {
+    id,
+    location,
+    securityProperty: `${id} security property`,
+    failureMode: "missing_constraint",
+    why: `${id} rationale`,
+  };
+}
 
 function assertNoLocalAbsolutePath(body, label, forbiddenRoots) {
   for (const forbiddenRoot of forbiddenRoots) {

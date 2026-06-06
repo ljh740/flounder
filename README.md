@@ -103,13 +103,15 @@ For Claude Code, use the direct CLI fallback provider. `xhigh` maps to Claude Co
 fsa run --config ./audit-config.json --provider claude-code --model claude-opus-4-8 --thinking xhigh
 ```
 
-For cost-controlled exploratory runs, cap checklist size explicitly:
+For cost-controlled exploratory runs, cap the total audit item budget explicitly:
 
 ```bash
 fsa run --config ./audit-config.json --max-items 25
 ```
 
 The default is uncapped.
+
+When `--rounds` is greater than 1, the first enumeration round does not consume the entire cap. The scheduler reserves budget for follow-up rounds and selects the initial checklist with source-location diversity so later modules are not dropped simply because one file produced many early candidates.
 
 ## Context Retrieval
 
