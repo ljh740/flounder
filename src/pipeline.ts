@@ -9,14 +9,16 @@ import { learnProject } from "./learn/project.js";
 import { mergeProjectContexts } from "./lens/context.js";
 import { discoverLensPacks } from "./lens/discover.js";
 import { createLlmClient } from "./llm/client.js";
+import { extractProofObligations } from "./obligations/extract.js";
 import { profileProject } from "./profile/project.js";
+import { extractHalo2Provenance } from "./provenance/halo2.js";
 import { renderDisclosure } from "./reports/disclosure.js";
 import { summarizeChecklist, summarizeRun, summarizeSourceIndex } from "./reports/coverage.js";
 import { deepenAuditItems } from "./rounds/deepen.js";
 import { writeLastRunPointer } from "./trace/last-run.js";
 import { RunLogger } from "./trace/logger.js";
 import { loadResumedRunState } from "./trace/run-state.js";
-import type { AuditItem, AuditLensPackDefinition, AuditResult, AuditSummary, LlmClient, ProjectLearning } from "./types.js";
+import type { AuditItem, AuditLensPackDefinition, AuditResult, AuditSummary, LlmClient, ProjectLearning, ProofObligation, ProvenanceGraph } from "./types.js";
 import { publicPath } from "./util/paths.js";
 import { verifyTop } from "./verify/planner.js";
 
@@ -27,10 +29,13 @@ export interface PipelineResult {
 
 export async function runPipeline(
   cfg: AuditorConfig,
-  options: { verifyTopK?: number; llm?: LlmClient; resumeRunDir?: string } = {},
+  options: { verifyTopK?: number; llm?: LlmClient; resumeRunDir?: string; streamEvents?: boolean } = {},
 ): Promise<PipelineResult> {
   const resumed = options.resumeRunDir ? await loadResumedRunState(options.resumeRunDir) : undefined;
-  const logger = new RunLogger(cfg.outputDir, cfg.targetName, new Date(), resumed ? { runDir: resumed.runDir } : {});
+  const logger = new RunLogger(cfg.outputDir, cfg.targetName, new Date(), {
+    ...(resumed ? { runDir: resumed.runDir } : {}),
+    streamEvents: options.streamEvents ?? false,
+  });
   await logger.init();
   await writeLastRunPointer(path.dirname(logger.runDir), logger.runDir, cfg.targetName);
   const requestedRounds = Math.max(1, Math.floor(cfg.rounds));
@@ -56,9 +61,13 @@ export async function runPipeline(
   const source = await loadSource(cfg.sourcePaths);
   const projectProfile = profileProject([...source, ...corpus]);
   const sourceIndex = new SourceIndex(source);
+  const provenanceGraphs = extractProvenanceGraphs(source);
   await logger.event("knowledge_loaded", { corpusDocs: corpus.length, sourceDocs: source.length });
   await logger.artifact("project_profile.json", projectProfile);
   await logger.artifact("source_index.json", summarizeSourceIndex(source, sourceIndex.symbols));
+  for (const graph of provenanceGraphs) {
+    await logger.artifact(`${graph.domain}_provenance_graph.json`, graph);
+  }
 
   const llm = cfg.dryRun ? undefined : options.llm ?? createLlmClient(cfg, logger);
   if (llm && "setLogger" in llm && typeof llm.setLogger === "function") {
@@ -66,6 +75,7 @@ export async function runPipeline(
   }
 
   let projectLearning: ProjectLearning | undefined;
+  let proofObligations: ProofObligation[];
   let lensPacks: AuditLensPackDefinition[];
   let items: AuditItem[];
   let results: AuditResult[];
@@ -74,6 +84,7 @@ export async function runPipeline(
 
   if (resumed) {
     projectLearning = resumed.projectLearning;
+    proofObligations = extractProofObligations({ source, corpus, ...(projectLearning ? { projectLearning } : {}), provenanceGraphs });
     lensPacks = mergeLensPacks(resumed.lensPacks, cfg.lensPacks);
     items = [...resumed.items];
     results = [...resumed.results];
@@ -98,9 +109,27 @@ export async function runPipeline(
     });
   } else {
     projectLearning = await learnProject({ cfg, corpus, source, projectProfile, ...(llm ? { llm } : {}), logger });
+    proofObligations = extractProofObligations({ source, corpus, projectLearning, provenanceGraphs });
+    await logger.artifact("proof_obligations.json", proofObligations);
+    await logger.event("proof_obligations_extracted", {
+      total: proofObligations.length,
+      byKind: countBy(proofObligations, (obligation) => obligation.kind),
+    });
     lensPacks = await discoverLensPacks({ cfg, corpus, source, projectProfile, projectLearning, ...(llm ? { llm } : {}), logger });
     const enumCfg = withLensPacks(cfg, lensPacks);
-    items = await enumerateAuditItems({ cfg: enumCfg, corpus, source, projectProfile, projectLearning, ...(llm ? { llm } : {}), logger, round: 1 });
+    items = await enumerateAuditItems({
+      cfg: enumCfg,
+      corpus,
+      source,
+      sourceIndex,
+      projectProfile,
+      projectLearning,
+      proofObligations,
+      provenanceGraphs,
+      ...(llm ? { llm } : {}),
+      logger,
+      round: 1,
+    });
     results = [];
     firstRound = 1;
     lastRound = requestedRounds;
@@ -108,6 +137,7 @@ export async function runPipeline(
   }
 
   const runCfg = withLensPacks(cfg, lensPacks);
+  await logger.artifact("proof_obligations.json", proofObligations);
 
   for (let round = firstRound; round <= lastRound; round += 1) {
     await logger.event("round_start", { round });
@@ -210,4 +240,17 @@ function withLensPacks(cfg: AuditorConfig, lensPacks: AuditLensPackDefinition[])
 
 function basename(input: string): string {
   return input.split(/[\\/]/).filter(Boolean).at(-1) ?? input;
+}
+
+function extractProvenanceGraphs(source: Parameters<typeof extractHalo2Provenance>[0]): ProvenanceGraph[] {
+  return [extractHalo2Provenance(source)].filter((graph) => graph.summary.facts > 0 || graph.summary.assignmentFlowObligations > 0);
+}
+
+function countBy<T, K extends string>(items: T[], keyFn: (item: T) => K): Record<K, number> {
+  const out = {} as Record<K, number>;
+  for (const item of items) {
+    const key = keyFn(item);
+    out[key] = (out[key] ?? 0) + 1;
+  }
+  return out;
 }

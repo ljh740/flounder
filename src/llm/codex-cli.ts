@@ -20,31 +20,51 @@ export class CodexCliClient implements LlmClient {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "fsa-codex-cli-"));
     const outputFile = path.join(tmp, "last-message.txt");
     const prompt = renderPrompt(input.system, input.user);
-    const args = [
-      "exec",
-      "--model",
-      input.model,
-      "--sandbox",
-      "read-only",
-      "--ephemeral",
-      "--skip-git-repo-check",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--cd",
-      tmp,
-      "--output-last-message",
+    const args = buildCodexExecArgs({
+      model: input.model,
+      workdir: tmp,
       outputFile,
-      "-",
-    ];
-    if (input.thinkingLevel) {
-      args.splice(1, 0, "-c", `model_reasoning_effort="${input.thinkingLevel}"`);
-    }
+      ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
+    });
+    let eventChain = Promise.resolve();
+    let textLineCount = 0;
+    let textLineSuppressed = false;
+    const enqueueEvent = (kind: string, data: Record<string, unknown>): void => {
+      if (!this.logger) return;
+      eventChain = eventChain
+        .then(() => this.logger?.event(kind, data))
+        .then(() => undefined)
+        .catch(() => undefined);
+    };
 
     try {
+      await this.logger?.event("model_call_start", {
+        tag: input.tag,
+        model: `codex-cli/${input.model}`,
+      });
       await spawnCodex(args, prompt, {
         maxBuffer: 10 * 1024 * 1024,
         timeout: Number(process.env.FSA_CODEX_TIMEOUT_MS ?? 900_000),
+        onJsonEvent: (event) => {
+          enqueueEvent("codex_cli_event", {
+            tag: input.tag,
+            ...summarizeCodexEvent(event),
+          });
+        },
+        onTextLine: ({ stream, line }) => {
+          if (line.trim().length === 0) return;
+          if (textLineCount >= 24) {
+            if (!textLineSuppressed) {
+              textLineSuppressed = true;
+              enqueueEvent("codex_cli_output_suppressed", { tag: input.tag, reason: "too_many_non_json_lines" });
+            }
+            return;
+          }
+          textLineCount += 1;
+          enqueueEvent("codex_cli_output", { tag: input.tag, stream, line: sanitizeRuntimeLine(line) });
+        },
       });
+      await eventChain;
       const text = await readFile(outputFile, "utf8");
       await this.logger?.call({
         tag: input.tag,
@@ -57,6 +77,7 @@ export class CodexCliClient implements LlmClient {
       return text;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      await eventChain;
       await this.logger?.call({
         tag: input.tag,
         model: `codex-cli/${input.model}`,
@@ -72,6 +93,35 @@ export class CodexCliClient implements LlmClient {
   }
 }
 
+export function buildCodexExecArgs(input: {
+  model: string;
+  workdir: string;
+  outputFile: string;
+  thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh";
+}): string[] {
+  const args = [
+    "exec",
+    "--model",
+    input.model,
+    "--json",
+    "--sandbox",
+    "read-only",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--cd",
+    input.workdir,
+    "--output-last-message",
+    input.outputFile,
+    "-",
+  ];
+  if (input.thinkingLevel) {
+    args.splice(1, 0, "-c", `model_reasoning_effort="${input.thinkingLevel}"`);
+  }
+  return args;
+}
+
 function renderPrompt(system: string, user: string): string {
   return `You are acting as a non-interactive language model inside an audit pipeline.
 Do not run tools, inspect files, or rely on external context. Answer only from the text below.
@@ -84,12 +134,27 @@ ${user}
 `;
 }
 
-function spawnCodex(args: string[], input: string, options: { maxBuffer: number; timeout: number }): Promise<void> {
+function spawnCodex(
+  args: string[],
+  input: string,
+  options: {
+    maxBuffer: number;
+    timeout: number;
+    onJsonEvent?: (event: Record<string, unknown>) => void;
+    onTextLine?: (input: { stream: "stdout" | "stderr"; line: string }) => void;
+  },
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn("codex", args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;
+    const stdoutLines = createLineParser((line) => {
+      handleCodexLine(line, "stdout", options);
+    });
+    const stderrLines = createLineParser((line) => {
+      handleCodexLine(line, "stderr", options);
+    });
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -101,9 +166,11 @@ function spawnCodex(args: string[], input: string, options: { maxBuffer: number;
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout = appendBounded(stdout, chunk, options.maxBuffer);
+      stdoutLines.push(chunk);
     });
     child.stderr.on("data", (chunk: string) => {
       stderr = appendBounded(stderr, chunk, options.maxBuffer);
+      stderrLines.push(chunk);
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       if (error.code === "EPIPE") return;
@@ -122,6 +189,8 @@ function spawnCodex(args: string[], input: string, options: { maxBuffer: number;
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      stdoutLines.flush();
+      stderrLines.flush();
       if (code === 0) {
         resolve();
       } else {
@@ -130,6 +199,90 @@ function spawnCodex(args: string[], input: string, options: { maxBuffer: number;
     });
     child.stdin.end(input);
   });
+}
+
+function createLineParser(onLine: (line: string) => void): { push(chunk: string): void; flush(): void } {
+  let buffer = "";
+  return {
+    push(chunk: string) {
+      buffer += chunk;
+      for (;;) {
+        const idx = buffer.indexOf("\n");
+        if (idx < 0) break;
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        onLine(line);
+      }
+    },
+    flush() {
+      if (buffer.length === 0) return;
+      onLine(buffer);
+      buffer = "";
+    },
+  };
+}
+
+function handleCodexLine(
+  line: string,
+  stream: "stdout" | "stderr",
+  options: {
+    onJsonEvent?: (event: Record<string, unknown>) => void;
+    onTextLine?: (input: { stream: "stdout" | "stderr"; line: string }) => void;
+  },
+): void {
+  const trimmed = line.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed && typeof parsed === "object" && typeof (parsed as { type?: unknown }).type === "string") {
+        options.onJsonEvent?.(parsed as Record<string, unknown>);
+        return;
+      }
+    } catch {
+      // Fall through to non-JSON output handling.
+    }
+  }
+  options.onTextLine?.({ stream, line });
+}
+
+function summarizeCodexEvent(event: Record<string, unknown>): Record<string, unknown> {
+  const type = typeof event.type === "string" ? event.type : "unknown";
+  if (type === "thread.started") {
+    return {
+      eventType: type,
+      ...(typeof event.thread_id === "string" ? { threadId: event.thread_id } : {}),
+    };
+  }
+  if (type === "turn.completed") {
+    return {
+      eventType: type,
+      ...(event.usage && typeof event.usage === "object" ? { usage: event.usage } : {}),
+    };
+  }
+  if (type === "item.completed") {
+    const item = event.item && typeof event.item === "object" ? (event.item as Record<string, unknown>) : {};
+    const itemType = typeof item.type === "string" ? item.type : "unknown";
+    const text = typeof item.text === "string" ? item.text : undefined;
+    const includePreview = itemType.includes("reason") || itemType.includes("thinking");
+    return {
+      eventType: type,
+      itemType,
+      ...(typeof item.id === "string" ? { itemId: item.id } : {}),
+      ...(text !== undefined ? { textChars: text.length } : {}),
+      ...(includePreview && text ? { textPreview: sanitizeRuntimeLine(text).slice(0, 500) } : {}),
+    };
+  }
+  return { eventType: type };
+}
+
+function sanitizeRuntimeLine(line: string): string {
+  const home = os.homedir();
+  return line
+    .replaceAll(home, "~")
+    .replace(/\/Users\/[^/\s]+/g, "~")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1000);
 }
 
 function appendBounded(current: string, chunk: string, maxChars: number): string {

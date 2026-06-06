@@ -24,6 +24,7 @@ async function main(argv: string[]): Promise<void> {
     const resumeRunDir = await readResumeRunDir(rest, cfg.outputDir);
     const result = await runPipeline(cfg, {
       verifyTopK,
+      streamEvents: true,
       ...(resumeRunDir ? { resumeRunDir } : {}),
       ...(hasFlag(rest, "--mock-llm") ? { llm: new MockAuditLlmClient() } : {}),
     });
@@ -36,7 +37,7 @@ async function main(argv: string[]): Promise<void> {
     const checklistPath = readFlag(rest, "--checklist");
     if (!checklistPath) throw new Error("--checklist is required");
     const checklist = JSON.parse(await readFile(checklistPath, "utf8")) as AuditItem[];
-    const logger = new RunLogger(cfg.outputDir, cfg.targetName);
+    const logger = new RunLogger(cfg.outputDir, cfg.targetName, new Date(), { streamEvents: true });
     await logger.init();
     const source = await loadSource(cfg.sourcePaths);
     const corpus = await loadCorpus(cfg.corpusPaths);
@@ -83,9 +84,11 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig; verify
   cfg.qmdTimeoutMs = readIntFlag(args, "--qmd-timeout-ms") ?? cfg.qmdTimeoutMs;
   const qmdCollections = readMultiFlag(args, "--qmd-collection");
   if (qmdCollections.length > 0) cfg.qmdCollections = qmdCollections;
+  cfg.portfolioMaxItems = readIntFlag(args, "--portfolio-max-items") ?? cfg.portfolioMaxItems;
   if (args.includes("--dry-run")) cfg.dryRun = true;
   if (args.includes("--no-project-learning")) cfg.projectLearning = false;
   if (args.includes("--no-dynamic-lenses")) cfg.dynamicLensDiscovery = false;
+  if (args.includes("--no-portfolio-enumeration")) cfg.portfolioEnumeration = false;
   if (cfg.dryRun && !args.includes("--no-local-seeders")) cfg.localChecklistSeeders = true;
   if (args.includes("--local-seeders")) cfg.localChecklistSeeders = true;
   if (args.includes("--no-local-seeders")) cfg.localChecklistSeeders = false;
@@ -133,6 +136,12 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof raw.qmdCommand === "string") cfg.qmdCommand = raw.qmdCommand;
   if (typeof raw.qmdLimit === "number" && Number.isFinite(raw.qmdLimit)) cfg.qmdLimit = Math.max(1, Math.floor(raw.qmdLimit));
   if (typeof raw.qmdMinScore === "number" && Number.isFinite(raw.qmdMinScore)) cfg.qmdMinScore = Math.max(0, raw.qmdMinScore);
+  const rawPortfolioMaxItems = raw.portfolioMaxItems ?? raw.portfolio_max_items;
+  if (typeof rawPortfolioMaxItems === "number" && Number.isFinite(rawPortfolioMaxItems)) {
+    cfg.portfolioMaxItems = Math.max(1, Math.floor(rawPortfolioMaxItems));
+  }
+  const rawPortfolioEnumeration = raw.portfolioEnumeration ?? raw.portfolio_enumeration;
+  if (typeof rawPortfolioEnumeration === "boolean") cfg.portfolioEnumeration = rawPortfolioEnumeration;
   const rawQmdTimeoutMs = raw.qmdTimeoutMs ?? raw.qmd_timeout_ms;
   if (typeof rawQmdTimeoutMs === "number" && Number.isFinite(rawQmdTimeoutMs)) cfg.qmdTimeoutMs = Math.max(1000, Math.floor(rawQmdTimeoutMs));
   const rawQmdCollections = raw.qmdCollections ?? raw.qmd_collections ?? raw.qmdCollection ?? raw.qmd_collection;

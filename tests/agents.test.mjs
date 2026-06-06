@@ -35,7 +35,26 @@ test("auditor agent registry can be extended with custom failure modes", () => {
   assert.match(prompt, /Trace custom DSL constraints/);
 });
 
-test("default prompts do not embed report-specific source-binding hints", () => {
+test("audit prompt preserves item metadata needed for handoff analysis", () => {
+  const prompt = buildAuditPrompt(
+    {
+      id: "handoff-1",
+      location: "src/lib.rs:10-20",
+      securityProperty: "Checked values must satisfy the required relation.",
+      failureMode: "missing_constraint",
+      why: "Model-enumerated mixed-input item.",
+      specRefs: ["reference.md section 2"],
+      attackerControlledInputs: ["request.value", "stored.value"],
+    },
+    "fn example() {}",
+  );
+
+  assert.match(prompt, /specRefs: reference\.md section 2/);
+  assert.match(prompt, /attackerControlledInputs: request\.value; stored\.value/);
+  assert.match(prompt, /upstream-to-internal handoff/);
+});
+
+test("default prompts do not embed report-specific answer-shaped hints", () => {
   const cfg = defaultConfig();
   const enumeration = buildEnumerationPrompt({
     target: "neutral",
@@ -74,10 +93,15 @@ test("default prompts do not embed report-specific source-binding hints", () => 
   });
 
   const combined = `${enumeration}\n${audit}\n${deepening}`;
-  assert.doesNotMatch(combined, /source[- ]binding/i);
-  assert.doesNotMatch(combined, /row[- ]to[- ]row/i);
-  assert.doesNotMatch(combined, /row constancy/i);
-  assert.doesNotMatch(combined, /intended source/i);
+  assert.doesNotMatch(combined, answerPhrase("source", "binding", "[- ]"));
+  assert.doesNotMatch(combined, answerPhrase("row", "to", "[- ]", "row"));
+  assert.doesNotMatch(combined, answerPhrase("row", "constancy"));
+  assert.doesNotMatch(combined, answerPhrase("intended", "source"));
   assert.doesNotMatch(combined, /\bwitness\b|\badvice\b/i);
   assert.doesNotMatch(combined, /assign_advice|copy_advice/i);
 });
+
+function answerPhrase(first, second, separator = "\\s+", third = "") {
+  const tail = third ? `${separator}${third}` : "";
+  return new RegExp(`${first}${separator}${second}${tail}`, "i");
+}

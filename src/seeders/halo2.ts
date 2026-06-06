@@ -20,11 +20,11 @@ export function halo2AdviceAssignmentSeeder(source: Doc[]): AuditItem[] {
         id,
         location: `${doc.path}:${idx + 1}`,
         securityProperty:
-          "Every witness value used as a logical input to a circuit check must be constrained to the intended source value.",
+          "Every witness value used as a logical input to a circuit check must be enforced by visible circuit relations.",
         failureMode: "missing_constraint",
         why: hasLocalConstraint
-          ? "This assignment is near equality-related code; verify the actual value used downstream is constrained to the intended source."
-          : "This assigns witness advice without an obvious local equality/copy constraint. Trace whether a malicious prover can choose a different value.",
+          ? "This assignment is near equality-related code; verify how the value used downstream is enforced."
+          : "This assigns witness advice without an obvious local equality/copy relation. Trace whether a malicious prover can choose a semantically inconsistent value.",
         attackerControlledInputs: ["private witness values assigned by the prover"],
         seeder: "halo2_missing_constraint",
       });
@@ -75,11 +75,11 @@ export function halo2AdviceBindingSeeder(source: Doc[]): AuditItem[] {
         id,
         location: `${doc.path}:${start}-${end}`,
         securityProperty:
-          "Advice cells that stand in for an intended logical input must be constrained to that input before downstream gates rely on them.",
+          "Advice cells that stand in for logical inputs must be enforced by the downstream gates that rely on them.",
         failureMode: "missing_constraint",
         why:
-          `This halo2 region assigns advice cells (${labels}) from witness values (${sources}) in a scalar/point-binding context without a nearby copy/equality binding to the intended source. ` +
-          "Loop-internal constraints can make repeated advice cells equal to each other while still leaving the first cell free to differ from the real base/input.",
+          `This halo2 region assigns advice cells (${labels}) from witness values (${sources}) in a scalar/point dataflow context without a nearby copy/equality relation. ` +
+          "Loop-internal constraints can make repeated advice cells equal to each other while still leaving an entry cell free to differ from a semantic input.",
         attackerControlledInputs: [
           "private witness values supplied by the prover",
           "intermediate advice cells used by scalar multiplication or point-binding gates",

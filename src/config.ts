@@ -49,6 +49,8 @@ export interface AuditorConfig {
   qmdMinScore: number;
   qmdTimeoutMs: number;
   qmdCollections: string[];
+  portfolioEnumeration: boolean;
+  portfolioMaxItems: number;
   failureModes: FailureMode[];
   auditorAgents: AuditorAgentDefinition[];
   projectContext: ProjectContext;
@@ -83,6 +85,8 @@ export function defaultConfig(): AuditorConfig {
     qmdMinScore: 0.25,
     qmdTimeoutMs: 60_000,
     qmdCollections: [],
+    portfolioEnumeration: true,
+    portfolioMaxItems: 12,
     failureModes: DEFAULT_FAILURE_MODES,
     auditorAgents: [],
     projectContext: {},

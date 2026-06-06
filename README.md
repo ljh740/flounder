@@ -135,8 +135,11 @@ QMD must already be installed and indexed for the target material. Use `--qmd-co
 Good recall quality is enforced through three mechanisms:
 
 - deterministic source navigation is tested with fixtures for multi-file locations, semicolon-separated locations, and delegated helper calls;
-- each run emits context retrieval traces so missed definitions are visible and reproducible;
+- each run emits enumeration and audit context retrieval traces so missed definitions are visible and reproducible;
+- proof obligations and provenance facts are extracted before enumeration, then used to prioritize source slices that might otherwise be truncated by a large repository overview;
 - optional QMD retrieval is collection-scoped, score-filtered, traced, and treated as a supplement to structural retrieval, not a replacement for it.
+
+`proof_obligations.json` records spec, source, initialization-learning, and provenance-derived properties that should be turned into source-backed audit items when relevant. `halo2_provenance_graph.json` records Halo2 advice/copy/equality/gate facts when the source uses that API. These artifacts are context-routing inputs only. They do not produce findings and should not be treated as static vulnerability rules.
 
 ## Continuing A Run
 
@@ -247,6 +250,16 @@ npm run check:source-discovery -- \
   --max-items 25
 ```
 
+You can also reuse an audit config file so the check runs with the same source paths, reference corpus, portfolio enumeration, retrieval mode, model, rounds, and project context as a normal audit:
+
+```bash
+npm run check:source-discovery -- \
+  --config ./audit-config.json \
+  --expect-location-file-regex '<file-regex>' \
+  --expect-location-line <line> \
+  --expect-evidence-regex '<evidence-regex>'
+```
+
 `check:source-discovery` is intentionally not part of default CI because it requires provider credentials and live model calls. It fails unless initialization learning, enumeration, and audit model calls are recorded and a model-produced finding generates a disclosure report.
 
 For stronger source-discovery runs, this gate disables local checklist seeders by default. The model must first learn from the provided source and corpus, enumerate the matching audit item, then audit it. Use `--allow-local-seeders` only for debugging checklist coverage.
@@ -272,6 +285,9 @@ Each run writes:
 - `checklist.json`: enumerated audit items.
 - `project_profile.json`: deterministic project profile.
 - `project_learning.json`: model-written initialization notes derived from loaded source, corpus, and configured high-level scope.
+- `proof_obligations.json`: source/spec/learning/provenance properties used to guide checklist enumeration.
+- `<domain>_provenance_graph.json`: machine-extracted provenance facts for supported adapters, such as Halo2 advice/copy/equality/gate structure.
+- `round_<n>_enumeration_context_retrieval.json`: source slices placed into enumeration before the broad source overview.
 - `lens_packs.json`: configured plus model-generated audit lens packs.
 - `round_<n>_deepening_items.json`: model-generated novel follow-up items for round 2 and later.
 - `round_<n>_audit_results.json`: audit results for one exploration round.

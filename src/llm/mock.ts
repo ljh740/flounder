@@ -75,6 +75,19 @@ function responseFor(tag: string, user: string): string {
     ]);
   }
 
+  if (tag === "enumerate_assignment_dataflow") {
+    return JSON.stringify([
+      {
+        id: "mock-assignment-dataflow",
+        location: "fixtures/halo2_scalar_mul_binding.rs:13-14",
+        securityProperty: "Assigned values used by checked logic must have a visible enforcement path.",
+        failureMode: "missing_constraint",
+        why: "Mock portfolio item used to test focused evidence-portfolio enumeration.",
+        attackerControlledInputs: ["private value assignment"],
+      },
+    ]);
+  }
+
   if (tag === "deepen_round_2" || tag === "deepen_round_2_breadth") {
     return JSON.stringify([
       {

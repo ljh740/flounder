@@ -49,9 +49,9 @@ test("qmd parser tolerates progress text around JSON output", () => {
 });
 
 test("qmd query args include optional collection filters", () => {
-  assert.deepEqual(qmdArgsForQuery("find source binding", { limit: 5, minScore: 0.25, collections: ["target-code", "target-docs", "target-code"] }), [
+  assert.deepEqual(qmdArgsForQuery("find assignment ingress", { limit: 5, minScore: 0.25, collections: ["target-code", "target-docs", "target-code"] }), [
     "query",
-    "find source binding",
+    "find assignment ingress",
     "--format",
     "json",
     "-n",

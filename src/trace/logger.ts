@@ -5,13 +5,15 @@ export class RunLogger {
   readonly runDir: string;
   readonly callsDir: string;
   readonly eventsPath: string;
+  readonly streamEvents: boolean;
   #callSeq = 0;
 
-  constructor(baseDir: string, targetName: string, now = new Date(), options: { runDir?: string } = {}) {
+  constructor(baseDir: string, targetName: string, now = new Date(), options: { runDir?: string; streamEvents?: boolean } = {}) {
     const ts = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     this.runDir = options.runDir ? path.resolve(options.runDir) : path.join(baseDir, `${targetName}-${ts}`);
     this.callsDir = path.join(this.runDir, "calls");
     this.eventsPath = path.join(this.runDir, "events.jsonl");
+    this.streamEvents = options.streamEvents ?? false;
   }
 
   async init(): Promise<void> {
@@ -22,6 +24,9 @@ export class RunLogger {
   async event(kind: string, data: Record<string, unknown> = {}): Promise<void> {
     const rec = { ts: new Date().toISOString(), kind, ...data };
     await appendFile(this.eventsPath, `${JSON.stringify(rec)}\n`);
+    if (this.streamEvents) {
+      process.stderr.write(`${formatEventLine(kind, data)}\n`);
+    }
   }
 
   async call(input: {
@@ -67,6 +72,37 @@ export class RunLogger {
     await this.event("artifact", { name, path: toPosix(name) });
     return file;
   }
+}
+
+function formatEventLine(kind: string, data: Record<string, unknown>): string {
+  const details = Object.entries(data)
+    .filter(([, value]) => value !== undefined)
+    .slice(0, 10)
+    .map(([key, value]) => `${key}=${formatEventValue(value)}`)
+    .join(" ");
+  return details ? `[fsa] ${kind} ${details}` : `[fsa] ${kind}`;
+}
+
+function formatEventValue(value: unknown): string {
+  if (typeof value === "string") return quoteCompact(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return quoteCompact(`[${value.map((item) => formatShort(item)).join(",")}]`);
+  if (value && typeof value === "object") return quoteCompact(JSON.stringify(value));
+  if (value === null) return "null";
+  return quoteCompact(String(value));
+}
+
+function formatShort(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null) return "null";
+  return JSON.stringify(value);
+}
+
+function quoteCompact(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  const truncated = compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
+  return JSON.stringify(truncated);
 }
 
 function safeName(input: string): string {

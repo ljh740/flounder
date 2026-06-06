@@ -7,7 +7,18 @@ export interface RawAuditItem {
   security_property?: string;
   failureMode?: string;
   failure_mode?: string;
+  failureModes?: string[];
+  failure_modes?: string[];
   why?: string;
+  title?: string;
+  auditObjective?: string;
+  audit_objective?: string;
+  dataflow?: string;
+  checks?: string[];
+  sourceRefs?: string[];
+  source_refs?: string[];
+  referenceRefs?: string[];
+  reference_refs?: string[];
   specRefs?: string[];
   spec_refs?: string[];
   attackerControlledInputs?: string[];
@@ -16,24 +27,35 @@ export interface RawAuditItem {
 }
 
 export function normalizeAuditItem(raw: RawAuditItem, round?: number): AuditItem | undefined {
-  const location = raw.location?.trim();
-  const securityProperty = (raw.securityProperty ?? raw.security_property)?.trim();
-  const failureMode = (raw.failureMode ?? raw.failure_mode)?.trim();
+  const location = (raw.location ?? raw.sourceRefs?.join("; ") ?? raw.source_refs?.join("; "))?.trim();
+  const securityProperty = (raw.securityProperty ?? raw.security_property ?? raw.auditObjective ?? raw.audit_objective ?? raw.title)?.trim();
+  const failureMode = (raw.failureMode ?? raw.failure_mode ?? raw.failureModes?.[0] ?? raw.failure_modes?.[0])?.trim();
   if (!location || !securityProperty || !failureMode) return undefined;
+  const why = raw.why?.trim() || portfolioWhy(raw) || "Enumerated by model.";
   const item: AuditItem = {
     id: raw.id?.trim() || slug(`${failureMode}-${location}`),
     location,
     securityProperty,
     failureMode: failureMode as AuditItem["failureMode"],
-    why: raw.why?.trim() || "Enumerated by model.",
+    why,
   };
-  const specRefs = raw.specRefs ?? raw.spec_refs;
+  const specRefs = raw.specRefs ?? raw.spec_refs ?? raw.referenceRefs ?? raw.reference_refs;
   const attackerControlledInputs = raw.attackerControlledInputs ?? raw.attacker_controlled_inputs;
   if (specRefs) item.specRefs = specRefs;
   if (attackerControlledInputs) item.attackerControlledInputs = attackerControlledInputs;
   if (round !== undefined) item.round = round;
   if (raw.strategy === "breadth" || raw.strategy === "depth") item.strategy = raw.strategy;
   return item;
+}
+
+function portfolioWhy(raw: RawAuditItem): string | undefined {
+  const parts = [
+    raw.dataflow,
+    ...(Array.isArray(raw.checks) && raw.checks.length > 0 ? [`Checks: ${raw.checks.join(" ")}`] : []),
+  ]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
 export function dedupeAuditItems(items: AuditItem[]): AuditItem[] {

@@ -6,7 +6,7 @@ import test from "node:test";
 import { defaultConfig } from "../dist/config.js";
 import { createLlmClient } from "../dist/llm/client.js";
 import { ClaudeCodeClient } from "../dist/llm/claude-code.js";
-import { CodexCliClient } from "../dist/llm/codex-cli.js";
+import { buildCodexExecArgs, CodexCliClient } from "../dist/llm/codex-cli.js";
 import { PiAiClient } from "../dist/llm/pi-ai.js";
 import { RunLogger } from "../dist/trace/logger.js";
 
@@ -20,4 +20,22 @@ test("llm factory uses pi-ai by default and CLI fallbacks only when requested", 
   assert.ok(createLlmClient(cfg, logger) instanceof CodexCliClient);
   cfg.provider = "claude-code";
   assert.ok(createLlmClient(cfg, logger) instanceof ClaudeCodeClient);
+});
+
+test("codex-cli fallback isolates non-interactive audit calls from user config and rules", () => {
+  const args = buildCodexExecArgs({
+    model: "gpt-5.5",
+    workdir: "tmp-workdir",
+    outputFile: "tmp-workdir/last-message.txt",
+    thinkingLevel: "xhigh",
+  });
+
+  assert.deepEqual(args.slice(0, 3), ["exec", "-c", 'model_reasoning_effort="xhigh"']);
+  assert.ok(args.includes("--ephemeral"));
+  assert.ok(args.includes("--json"));
+  assert.ok(args.includes("--ignore-user-config"));
+  assert.ok(args.includes("--ignore-rules"));
+  assert.ok(args.includes("--sandbox"));
+  assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
+  assert.doesNotMatch(args.join(" "), /danger-full-access/);
 });

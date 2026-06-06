@@ -10,7 +10,7 @@ test("deepening accepts only novel follow-up items", async () => {
   const existing = {
     id: "existing",
     location: "src/circuit.rs:10-12",
-    securityProperty: "Advice cell is constrained to its intended source.",
+    securityProperty: "The checked cell is constrained to its declared ingress value.",
     failureMode: "missing_constraint",
     why: "Initial item.",
     round: 1,
@@ -32,7 +32,7 @@ test("deepening accepts only novel follow-up items", async () => {
         {
           id: "duplicate",
           location: "src/circuit.rs:10-12",
-          securityProperty: "Advice cell is constrained to its intended source.",
+          securityProperty: "The checked cell is constrained to its declared ingress value.",
           failureMode: "missing_constraint",
           why: "This repeats round 1 and must be dropped.",
         },

@@ -1,5 +1,6 @@
 import type { AuditItem, Doc } from "../types.js";
 import { numberLines } from "../ingest/source.js";
+import { retrievalTermsForItem, shouldIncludeStructuralContext } from "./retrieval-terms.js";
 import { parseLocationRanges } from "../util/location.js";
 
 export interface ContextSlice {
@@ -60,7 +61,7 @@ export class SourceIndex {
 
   slicesForItem(item: AuditItem): ContextSlice[] {
     const out: ContextSlice[] = [];
-    const terms = termsForItem(item);
+    const terms = retrievalTermsForItem(item);
     const directDocs: Doc[] = [];
     const directSlices: ContextSlice[] = [];
     for (const direct of parseLocationRanges(item.location)) {
@@ -93,7 +94,10 @@ export class SourceIndex {
       });
     }
 
-    if (needsStructuralConstraintContext(item, expandedTerms)) {
+    const symbolNames = new Set(this.symbols.map((symbol) => symbol.name.toLowerCase()));
+    out.push(...callSiteSlicesForTerms(this.docs, referenceTerms.filter((term) => symbolNames.has(term)).slice(0, 12), directSlices));
+
+    if (shouldIncludeStructuralContext(item, expandedTerms)) {
       for (const doc of directDocs) {
         for (const symbol of this.symbols.filter((candidate) => candidate.path === doc.path && isConstraintSupportSymbol(candidate.name))) {
           out.push({
@@ -229,57 +233,6 @@ function fallbackContext(docs: Doc[], budget: number): string {
   return chunks.join("");
 }
 
-function termsForItem(item: AuditItem): string[] {
-  const text = [
-    item.id,
-    item.location,
-    item.securityProperty,
-    item.failureMode,
-    item.why,
-    ...(item.attackerControlledInputs ?? []),
-  ].join(" ");
-  const raw = text
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/)
-    .filter((term) => term.length >= 4);
-  const priority = [
-    "assign_advice",
-    "copy_advice",
-    "nullifier",
-    "balance",
-    "supply",
-    "signature",
-    "verify",
-    "auth",
-    "session",
-    "tenant",
-    "permission",
-    "owner",
-    "admin",
-    "query",
-    "sql",
-    "fetch",
-    "url",
-    "path",
-    "file",
-    "deserialize",
-    "external",
-    "call",
-    "proof",
-    "constraint",
-  ];
-  return [...new Set([...priority.filter((term) => text.toLowerCase().includes(term)), ...raw])].slice(0, 24);
-}
-
-function needsStructuralConstraintContext(item: AuditItem, terms: string[]): boolean {
-  const failureMode = item.failureMode.toLowerCase();
-  return (
-    failureMode.includes("constraint") ||
-    failureMode.includes("soundness") ||
-    terms.some((term) => ["advice", "assign_advice", "copy_advice", "witness", "constraint", "gate", "selector", "circuit", "proof"].includes(term))
-  );
-}
-
 function isConstraintSupportSymbol(name: string): boolean {
   return /configure|create_gate|gate|constraint|synthesi[sz]e|assign|layout/i.test(name);
 }
@@ -300,6 +253,10 @@ function referenceTermsForSlices(slices: ContextSlice[]): string[] {
     "ok",
     "unwrap",
     "zip",
+    "assign_advice",
+    "copy_advice",
+    "query_advice",
+    "query_selector",
   ]);
   const out: string[] = [];
   for (const slice of slices) {
@@ -322,6 +279,47 @@ function searchLines(doc: Doc, terms: string[]): number[] {
     if (terms.some((term) => lowered.includes(term))) hits.push(idx + 1);
   }
   return hits;
+}
+
+function callSiteSlicesForTerms(docs: Doc[], terms: string[], directSlices: ContextSlice[]): ContextSlice[] {
+  const directRanges = directSlices.map((slice) => ({
+    path: slice.doc.path,
+    startLine: slice.startLine,
+    endLine: slice.endLine,
+  }));
+  const out: ContextSlice[] = [];
+  const seen = new Set<string>();
+  for (const term of terms) {
+    const callPattern = new RegExp(`\\b${escapeRegExp(term)}\\s*[(<]`);
+    for (const doc of docs) {
+      const lines = doc.content.split(/\r?\n/);
+      for (let idx = 0; idx < lines.length; idx += 1) {
+        const lineNumber = idx + 1;
+        if (isInsideDirectRange(doc.path, lineNumber, directRanges)) continue;
+        if (!callPattern.test(lines[idx] ?? "")) continue;
+        const key = `${doc.path}:${term}:${lineNumber}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          doc,
+          startLine: Math.max(1, lineNumber - 35),
+          endLine: lineNumber + 45,
+          reason: `call site ${term}`,
+        });
+        if (out.length >= 24) return out;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+function isInsideDirectRange(path: string, line: number, ranges: Array<{ path: string; startLine: number; endLine: number }>): boolean {
+  return ranges.some((range) => range.path === path && line >= range.startLine && line <= range.endLine);
+}
+
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function rawSlice(doc: Doc, startLine: number, endLine: number): string {

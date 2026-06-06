@@ -84,6 +84,52 @@ export interface ProjectLearning {
   evidenceRefs?: string[];
 }
 
+export interface ProofObligation {
+  id: string;
+  kind: "spec" | "source" | "learning" | "provenance";
+  property: string;
+  rationale: string;
+  evidenceRefs: string[];
+  keywords?: string[];
+}
+
+export type ProvenanceFactKind =
+  | "advice_assignment"
+  | "advice_copy"
+  | "equality_constraint"
+  | "equality_enabled_column"
+  | "gate_creation"
+  | "gate_query"
+  | "selector";
+
+export interface ProvenanceFact {
+  id: string;
+  domain: string;
+  kind: ProvenanceFactKind;
+  path: string;
+  line: number;
+  functionName?: string;
+  label?: string;
+  column?: string;
+  rowExpression?: string;
+  sourceExpression?: string;
+  receiver?: string;
+  nearbySignals: string[];
+  code: string;
+}
+
+export interface ProvenanceGraph {
+  domain: string;
+  facts: ProvenanceFact[];
+  obligations: ProofObligation[];
+  summary: {
+    files: number;
+    facts: number;
+    byKind: Partial<Record<ProvenanceFactKind, number>>;
+    assignmentFlowObligations: number;
+  };
+}
+
 export interface AuditItem {
   id: string;
   location: string;

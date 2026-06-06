@@ -24,20 +24,21 @@ test("checklist seeders enumerate Halo2 missing-constraint audit items", async (
   assert.ok(items.every((item) => item.location.includes("halo2_missing_constraint.rs")));
 });
 
-test("checklist seeders enumerate scalar-mul advice binding questions from source shape", async () => {
+test("checklist seeders enumerate scalar-mul advice dataflow questions from source shape", async () => {
   const source = await loadSource([scalarMulFixture]);
   const items = runSeeders(source);
   const bindingItems = items.filter((item) => item.seeder === "halo2_advice_binding");
   assert.equal(bindingItems.length, 1);
   assert.equal(bindingItems[0].failureMode, "missing_constraint");
   assert.match(bindingItems[0].location, /halo2_scalar_mul_binding\.rs:13-14/);
-  assert.match(bindingItems[0].why, /scalar\/point-binding context/);
-  assert.match(bindingItems[0].securityProperty, /constrained to that input/);
+  assert.match(bindingItems[0].why, /scalar\/point dataflow context/);
+  assert.match(bindingItems[0].securityProperty, /enforced by the downstream gates/);
 });
 
 test("dry-run pipeline writes checklist and summary without model calls", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-dry-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-dry";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -54,6 +55,7 @@ test("dry-run pipeline writes checklist and summary without model calls", async 
   await stat(path.join(result.runDir, "lens_packs.json"));
   await stat(path.join(result.runDir, "summary.json"));
   await stat(path.join(result.runDir, "source_index.json"));
+  await stat(path.join(result.runDir, "proof_obligations.json"));
   await stat(path.join(result.runDir, "checklist_coverage.json"));
   assert.deepEqual(await readdir(path.join(result.runDir, "calls")), []);
 });
@@ -61,6 +63,7 @@ test("dry-run pipeline writes checklist and summary without model calls", async 
 test("mock pipeline runs enumerate, audit, verify, and report end to end", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-mock-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-mock";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -90,6 +93,13 @@ test("mock pipeline runs enumerate, audit, verify, and report end to end", async
   assert.equal(contextTrace.length, 6);
   assert.ok(contextTrace.every((trace) => trace.mode === "source-index"));
   assert.ok(contextTrace.every((trace) => trace.slices.every((slice) => !path.isAbsolute(slice.path))));
+  const enumTrace = JSON.parse(await readFile(path.join(result.runDir, "round_1_enumeration_context_retrieval.json"), "utf8"));
+  assert.equal(enumTrace.mode, "source-index");
+  assert.ok(enumTrace.provenanceFacts > 0);
+  assert.ok(enumTrace.slices.some((slice) => slice.reason.includes("halo2 provenance")));
+  const obligations = JSON.parse(await readFile(path.join(result.runDir, "proof_obligations.json"), "utf8"));
+  assert.ok(obligations.some((obligation) => obligation.kind === "provenance"));
+  await stat(path.join(result.runDir, "halo2_provenance_graph.json"));
 
   const firstFindingId = result.summary.findings[0].id;
   const reportName = `report_${firstFindingId}.md`;
@@ -99,6 +109,9 @@ test("mock pipeline runs enumerate, audit, verify, and report end to end", async
 
   for (const artifact of [
     "source_index.json",
+    "proof_obligations.json",
+    "halo2_provenance_graph.json",
+    "round_1_enumeration_context_retrieval.json",
     "project_learning.json",
     "checklist.json",
     "checklist_coverage.json",
@@ -114,6 +127,7 @@ test("mock pipeline runs enumerate, audit, verify, and report end to end", async
 test("model-only mode requires checklist items from model enumeration", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-model-only-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-model-only";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -139,6 +153,7 @@ test("model-only mode requires checklist items from model enumeration", async ()
 test("multi-round mode deepens with novel follow-up checklist items", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-rounds-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-rounds";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -172,6 +187,7 @@ test("multi-round mode deepens with novel follow-up checklist items", async () =
 test("multi-round item cap reserves budget for follow-up exploration", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-budgeted-rounds-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-budgeted-rounds";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -199,6 +215,7 @@ test("multi-round item cap reserves budget for follow-up exploration", async () 
 test("breadth strategy uses only breadth deepening budget", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-breadth-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-breadth";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -219,6 +236,7 @@ test("breadth strategy uses only breadth deepening budget", async () => {
 test("resume mode appends additional rounds to the previous run", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-resume-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-resume";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -258,6 +276,7 @@ test("resume mode appends additional rounds to the previous run", async () => {
 test("resume mode recovers from partial round artifacts", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-partial-resume-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-partial-resume";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -311,6 +330,7 @@ test("resume mode recovers from partial round artifacts", async () => {
 test("resume mode retries model-error items from the same round", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "fsa-model-error-resume-"));
   const cfg = defaultConfig();
+  cfg.portfolioEnumeration = false;
   cfg.targetName = "test-model-error-resume";
   cfg.sourcePaths = [fixtures];
   cfg.outputDir = out;
@@ -368,7 +388,7 @@ class BudgetedRoundsLlmClient {
         domainConcepts: ["checked assignment"],
         trustBoundaries: ["private witness values"],
         attackerCapabilities: ["choose private inputs"],
-        candidateInvariants: ["checked logic must bind values to their intended source"],
+        candidateInvariants: ["checked logic must bind values to their declared ingress"],
         implementationMechanics: ["fixtures contain small circuit-like code"],
         uncertainty: [],
         evidenceRefs: ["fixtures"],

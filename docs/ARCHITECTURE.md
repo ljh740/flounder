@@ -32,6 +32,7 @@ flowchart TD
     INDEX["SourceIndex structural retrieval"]
     QMD["Optional QMD semantic retrieval"]
     PROFILE["Deterministic project profile"]
+    PROV["Provenance adapters and proof obligations"]
     LEARN["Model initialization learning"]
     LENS["Model reconnaissance and dynamic lens packs"]
     ENUM["Model checklist enumeration"]
@@ -72,13 +73,16 @@ flowchart TD
   CFG --> ENUM
   INGEST --> INDEX
   INGEST --> QMD
+  INGEST --> PROV
   RESUME --> DEEPEN
   RESUME --> AGG
   INGEST --> PROFILE
   INDEX --> LEARN
   PROFILE --> LEARN
+  PROV --> ENUM
   LEARN --> LENS
   LEARN --> ENUM
+  LEARN --> PROV
   LEARN --> AUDIT1
   LEARN --> DEEPEN
   LEARN --> AUDITN
@@ -89,6 +93,7 @@ flowchart TD
   PROFILE --> LENS
   LENS --> ENUM
   INDEX --> ENUM
+  QMD -. optional supplement .-> ENUM
   ENUM --> ROUND1
   ROUND1 --> AUDIT1
   AUDIT1 --> AGG
@@ -133,9 +138,10 @@ source + corpus
   -> source index / optional QMD retrieval
   -> deterministic project profile
   -> model initialization learning notes
+  -> proof-obligation extraction / provenance adapters
   -> model project reconnaissance / dynamic lens packs
   -> optional local checklist seeders
-  -> LLM enumeration
+  -> retrieval-traced LLM enumeration
   -> round 1 checklist
   -> specialized audit trials
   -> round 2+ model deepening / novel checklist delta
@@ -145,7 +151,7 @@ source + corpus
   -> disclosure draft
 ```
 
-Project profile, source index, initialization learning notes, dynamic lens packs, and optional local checklist seeders are planning and context mechanisms. They may propose audit questions and routing guidance, but they must not produce bug findings. Findings come only from model-backed audit trials.
+Project profile, source index, initialization learning notes, proof obligations, provenance graphs, dynamic lens packs, and optional local checklist seeders are planning and context mechanisms. They may propose audit questions and routing guidance, but they must not produce bug findings. Findings come only from model-backed audit trials.
 
 `AuditorConfig.projectLearning` controls the model initialization stage. It is enabled by default for live runs and writes `project_learning.json`, a reviewable record of what the model learned from the loaded source, corpus, deterministic profile, and configured high-level scope before it proposes lenses or checklist items.
 
@@ -198,12 +204,22 @@ Project-specific customization has two layers:
 
 Live runs enable `projectLearning` and `dynamicLensDiscovery` by default. Project learning writes `project_learning.json`; lens discovery writes `lens_packs.json`. Both are normalized, bounded, reviewable planning artifacts, not findings.
 
+## Proof Obligations and Provenance
+
+The initialization path now extracts `proof_obligations.json` from loaded corpus, source text, model learning notes, and supported provenance adapters. Obligations are short source-backed properties that enumeration should turn into concrete audit items when visible implementation evidence exists. They are intentionally not vulnerability findings.
+
+Supported provenance adapters emit machine-readable facts about how security-relevant values move through a framework or DSL. The current Halo2 adapter writes `halo2_provenance_graph.json` with advice assignments, advice copies, equality constraints, equality-enabled columns, gate creation, gate queries, and selectors. This makes assignment and enforcement edges visible to the model even when a large source overview would otherwise truncate the relevant lines.
+
+The adapter does not encode "this is a bug" rules. It only creates attention-routing facts and generic assignment-flow obligations. The model must still enumerate a concrete source-backed audit item, the audit stage must reason over the retrieved code, and verification must confirm or refute the candidate locally.
+
 ## Context Retrieval Quality
 
 Audit prompts are intentionally bounded, so recall quality is part of audit correctness. The retrieval layer has two tiers:
 
 - Deterministic `SourceIndex` retrieval is always enabled. It includes exact `file:line` ranges, semicolon-separated multi-file ranges, nearby source windows, same-file structural context, and referenced helper definitions found in the direct context.
 - Optional `source-index+qmd` retrieval asks a locally installed QMD index for semantic matches and maps returned paths back to the already ingested source documents. QMD augments structural retrieval; it does not replace direct location or call-reference slices. Runs can pass `qmdCollections` or `--qmd-collection` to keep retrieval scoped to the target repository or corpus collection; this improves recall quality and avoids unrelated local collections.
+
+Enumeration writes `round_<n>_enumeration_context_retrieval.json` before the model produces the checklist. The selected source slices come from proof-obligation references, provenance facts, and optional QMD probes, then the remaining budget is used for a broad source overview. This is designed to prevent important late-file or cross-file assignment and ingress edges from being dropped before the model has a chance to enumerate them.
 
 Every non-dry audit round writes `round_<n>_context_retrieval.json`. Each entry records the item id, retrieval mode, included slices, line ranges, reasons, budgets, truncation status, QMD collection scope, and QMD availability or hit metadata. These traces are first-class debugging artifacts: if a model returns "needs more context", the next engineering step is to inspect whether the trace omitted the requested implementation, trait, constructor, test, or spec section.
 

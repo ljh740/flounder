@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectDiverseAuditItems } from "../dist/items.js";
+import { normalizeAuditItem, selectDiverseAuditItems } from "../dist/items.js";
 
 test("diverse item selection round-robins across source locations before capping", () => {
   const items = [
@@ -34,6 +34,26 @@ test("diversity buckets normalize line ranges and multi-range locations", () => 
     selected.map((entry) => entry.id),
     ["same-file-range-1", "caller"],
   );
+});
+
+test("normalizer accepts portfolio-style model item schemas", () => {
+  const normalized = normalizeAuditItem({
+    id: "portfolio-schema",
+    title: "Trace assigned value into checks",
+    failure_modes: ["missing_constraint", "soundness_gap"],
+    source_refs: ["chip/mul/incomplete.rs:309-310"],
+    reference_refs: ["book: scalar mul"],
+    audit_objective: "Assigned coordinates must be enforced by downstream gates.",
+    dataflow: "x_p and y_p are assigned as advice before gate checks consume them.",
+    checks: ["Check selector coverage.", "Check equality path."],
+  });
+
+  assert.ok(normalized);
+  assert.equal(normalized.location, "chip/mul/incomplete.rs:309-310");
+  assert.equal(normalized.failureMode, "missing_constraint");
+  assert.equal(normalized.securityProperty, "Assigned coordinates must be enforced by downstream gates.");
+  assert.match(normalized.why, /x_p and y_p/);
+  assert.deepEqual(normalized.specRefs, ["book: scalar mul"]);
 });
 
 function item(id, location) {

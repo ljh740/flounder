@@ -1,12 +1,15 @@
 import type { AuditorConfig } from "./config.js";
 import { effectiveFailureModes } from "./config.js";
-import { buildEnumerationPrompt, ENUM_SYSTEM } from "./agents/prompts.js";
-import { assemble } from "./ingest/source.js";
+import { buildEnumerationPrompt, buildPortfolioEnumerationPrompt, ENUM_SYSTEM } from "./agents/prompts.js";
+import { buildEnumerationContext } from "./enumeration/context.js";
+import { SourceIndex } from "./index/source-index.js";
 import { renderProjectLearning } from "./learn/project.js";
 import { renderLensPacks, renderProjectContext } from "./lens/context.js";
+import { renderProofObligations } from "./obligations/extract.js";
 import { renderProjectProfile } from "./profile/project.js";
+import { renderProvenanceGraph } from "./provenance/halo2.js";
 import { runSeeders } from "./seeders/index.js";
-import type { AuditItem, Doc, LlmClient, ProjectLearning, ProjectProfile } from "./types.js";
+import type { AuditItem, Doc, LlmClient, ProjectLearning, ProjectProfile, ProofObligation, ProvenanceGraph } from "./types.js";
 import { extractJsonArray } from "./util/json.js";
 import type { RunLogger } from "./trace/logger.js";
 import { dedupeAuditItems, normalizeAuditItem, selectDiverseAuditItems, type RawAuditItem } from "./items.js";
@@ -15,8 +18,11 @@ export async function enumerateAuditItems(input: {
   cfg: AuditorConfig;
   corpus: Doc[];
   source: Doc[];
+  sourceIndex?: SourceIndex;
   projectProfile?: ProjectProfile;
   projectLearning?: ProjectLearning;
+  proofObligations?: ProofObligation[];
+  provenanceGraphs?: ProvenanceGraph[];
   llm?: LlmClient;
   logger: RunLogger;
   round?: number;
@@ -30,8 +36,19 @@ export async function enumerateAuditItems(input: {
     return seeded;
   }
 
-  const corpusText = assemble(input.corpus, Math.floor(input.cfg.contextCharBudget / 2));
-  const sourceText = assemble(input.source, Math.floor(input.cfg.contextCharBudget / 2), true);
+  const sourceIndex = input.sourceIndex ?? new SourceIndex(input.source);
+  const proofObligations = input.proofObligations ?? [];
+  const provenanceGraphs = input.provenanceGraphs ?? [];
+  const enumContext = await buildEnumerationContext({
+    cfg: input.cfg,
+    corpus: input.corpus,
+    source: input.source,
+    sourceIndex,
+    proofObligations,
+    provenanceGraphs,
+    round,
+  });
+  await input.logger.artifact(`round_${round}_enumeration_context_retrieval.json`, enumContext.trace);
   const user = buildEnumerationPrompt({
     target: input.cfg.targetName,
     failureModes: effectiveFailureModes(input.cfg),
@@ -39,8 +56,10 @@ export async function enumerateAuditItems(input: {
     projectLearning: renderProjectLearning(input.projectLearning),
     projectContext: renderProjectContext(input.cfg.projectContext),
     lensPacks: renderLensPacks(input.cfg.lensPacks),
-    corpus: corpusText,
-    source: sourceText,
+    proofObligations: renderProofObligations(proofObligations),
+    provenanceFacts: provenanceGraphs.map((graph) => renderProvenanceGraph(graph)).filter(Boolean).join("\n\n"),
+    corpus: enumContext.corpus,
+    source: enumContext.source,
   });
   const text = await input.llm.complete({
     tag: "enumerate",
@@ -52,7 +71,21 @@ export async function enumerateAuditItems(input: {
   });
 
   const llmItems = extractJsonArray<RawAuditItem>(text).map((item) => normalizeAuditItem(item, round)).filter((item): item is AuditItem => item !== undefined);
-  const deduped = dedupeAuditItems([...seeded, ...llmItems]);
+  const portfolioItems = await enumeratePortfolios({
+    cfg: input.cfg,
+    corpus: enumContext.corpus,
+    source: enumContext.source,
+    projectProfile: input.projectProfile ? renderProjectProfile(input.projectProfile) : "",
+    projectLearning: renderProjectLearning(input.projectLearning),
+    projectContext: renderProjectContext(input.cfg.projectContext),
+    lensPacks: renderLensPacks(input.cfg.lensPacks),
+    proofObligations,
+    provenanceGraphs,
+    llm: input.llm,
+    logger: input.logger,
+    round,
+  });
+  const deduped = dedupeAuditItems([...seeded, ...portfolioItems, ...llmItems]);
   const roundOneBudget = initialEnumerationBudget(input.cfg);
   const all = selectDiverseAuditItems(deduped, roundOneBudget);
   if (all.length < deduped.length) {
@@ -65,8 +98,68 @@ export async function enumerateAuditItems(input: {
     });
   }
   await input.logger.artifact("checklist.json", all);
-  await input.logger.event("enumeration_done", { seeded: seeded.length, llm: llmItems.length, deduped: deduped.length, total: all.length });
+  await input.logger.event("enumeration_done", {
+    seeded: seeded.length,
+    llm: llmItems.length,
+    portfolio: portfolioItems.length,
+    deduped: deduped.length,
+    total: all.length,
+  });
   return all;
+}
+
+async function enumeratePortfolios(input: {
+  cfg: AuditorConfig;
+  corpus: string;
+  source: string;
+  projectProfile: string;
+  projectLearning: string;
+  projectContext: string;
+  lensPacks: string;
+  proofObligations: ProofObligation[];
+  provenanceGraphs: ProvenanceGraph[];
+  llm: LlmClient;
+  logger: RunLogger;
+  round: number;
+}): Promise<AuditItem[]> {
+  if (!input.cfg.portfolioEnumeration) return [];
+  const provenanceObligations = input.proofObligations.filter((obligation) => obligation.kind === "provenance");
+  if (provenanceObligations.length === 0 || input.provenanceGraphs.length === 0) return [];
+  const maxItems = Math.max(1, Math.floor(input.cfg.portfolioMaxItems));
+  const user = buildPortfolioEnumerationPrompt({
+    target: input.cfg.targetName,
+    portfolio: "assignment/dataflow evidence",
+    maxItems,
+    failureModes: effectiveFailureModes(input.cfg),
+    projectProfile: input.projectProfile,
+    projectLearning: input.projectLearning,
+    projectContext: input.projectContext,
+    lensPacks: input.lensPacks,
+    proofObligations: renderProofObligations(provenanceObligations, Math.max(12, maxItems * 6)),
+    provenanceFacts: input.provenanceGraphs.map((graph) => renderProvenanceGraph(graph, Math.max(80, maxItems * 12))).filter(Boolean).join("\n\n"),
+    corpus: input.corpus,
+    source: input.source,
+  });
+  try {
+    const text = await input.llm.complete({
+      tag: "enumerate_assignment_dataflow",
+      system: ENUM_SYSTEM,
+      user,
+      model: input.cfg.enumModel,
+      maxTokens: input.cfg.maxTokens,
+      thinkingLevel: input.cfg.thinkingLevel,
+    });
+    const items = extractJsonArray<RawAuditItem>(text)
+      .slice(0, maxItems)
+      .map((item) => normalizeAuditItem(item, input.round))
+      .filter((item): item is AuditItem => item !== undefined);
+    await input.logger.event("portfolio_enumeration_done", { portfolio: "assignment/dataflow", items: items.length });
+    return items;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await input.logger.event("portfolio_enumeration_error", { portfolio: "assignment/dataflow", error: message.slice(0, 500) });
+    return [];
+  }
 }
 
 function initialEnumerationBudget(cfg: Pick<AuditorConfig, "maxAuditItems" | "rounds" | "maxNewItemsPerRound">): number | undefined {

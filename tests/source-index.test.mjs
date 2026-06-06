@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SourceIndex } from "../dist/index/source-index.js";
+import { retrievalTermsForItem, shouldIncludeStructuralContext } from "../dist/index/retrieval-terms.js";
 
 test("source index expands comma-separated line ranges for one file", () => {
   const doc = makeDoc("external/incomplete.rs", 380, {
@@ -14,7 +15,7 @@ test("source index expands comma-separated line ranges for one file", () => {
     {
       id: "multi-range",
       location: "external/incomplete.rs:181-209,254-267,297-362",
-      securityProperty: "Assigned advice cells are constrained to the intended source values.",
+      securityProperty: "Assigned advice cells are constrained to the declared ingress values.",
       failureMode: "missing_constraint",
       why: "Model returned a multi-range location.",
     },
@@ -103,6 +104,39 @@ test("source index follows call references from direct context", () => {
   assert.match(context, /q_point_non_id selector/);
 });
 
+test("source index includes call sites for functions referenced by a direct slice", () => {
+  const caller = makeDoc("external/mul.rs", 220, {
+    105: "let (x_a, y_a, zs) = self.hi_config.double_and_add(",
+    106: "    &mut region, offset, base, bits, acc,",
+    107: ")?;",
+  });
+  const callee = makeDoc("external/incomplete.rs", 220, {
+    98: "pub(super) fn double_and_add(",
+    112: "region.assign_advice(|| \"x_p\", self.x_p, row + offset, || x_p)?;",
+    113: "region.assign_advice(|| \"y_p\", self.y_p, row + offset, || y_p)?;",
+  });
+  const noisy = makeDoc("external/noisy.rs", 220, {
+    20: "x_p filler",
+    70: "y_p filler",
+    120: "constraint filler",
+  });
+  const index = new SourceIndex([callee, noisy, caller]);
+  const trace = index.contextForItemWithTrace(
+    {
+      id: "callee-input-edge",
+      location: "external/incomplete.rs:112-113",
+      securityProperty: "Checked cells must stay connected to the incoming base point.",
+      failureMode: "missing_constraint",
+      why: "The direct location computes cells inside a helper, so the caller edge matters.",
+    },
+    10_000,
+  );
+
+  assert.match(trace.context, /pub\(super\) fn double_and_add/);
+  assert.match(trace.context, /self\.hi_config\.double_and_add/);
+  assert.ok(trace.slices.some((slice) => slice.path === "external/mul.rs" && slice.reason === "call site double_and_add" && slice.included));
+});
+
 test("source index adds constraint setup context for narrow advice-assignment items", () => {
   const doc = makeDoc("external/incomplete.rs", 180, {
     20: "pub(super) fn configure(meta: &mut ConstraintSystem<F>) -> Self {",
@@ -114,7 +148,7 @@ test("source index adds constraint setup context for narrow advice-assignment it
     {
       id: "base-coordinate-advice-source",
       location: "external/incomplete.rs:112",
-      securityProperty: "Assigned advice cells must be bound to the intended source values.",
+      securityProperty: "Assigned advice cells must be bound to the declared ingress values.",
       failureMode: "missing_constraint",
       why: "The item is narrow, but the audit also needs gate and equality setup.",
     },
@@ -124,6 +158,22 @@ test("source index adds constraint setup context for narrow advice-assignment it
   assert.match(context, /pub\(super\) fn configure/);
   assert.match(context, /fn create_gate/);
   assert.match(context, /region\.assign_advice/);
+});
+
+test("retrieval term helper separates context routing from findings", () => {
+  const item = {
+    id: "routing-only",
+    location: "src/circuit.rs:10",
+    securityProperty: "Assigned cells must be checked by the relevant equations.",
+    failureMode: "missing_constraint",
+    why: "The item needs nearby setup context before an auditor can reason.",
+    attackerControlledInputs: ["caller.value"],
+  };
+
+  const terms = retrievalTermsForItem(item);
+  assert.ok(terms.includes("constraint"));
+  assert.ok(terms.includes("caller"));
+  assert.equal(shouldIncludeStructuralContext(item, terms), true);
 });
 
 function makeDoc(path, lineCount, overrides) {
