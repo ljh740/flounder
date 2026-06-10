@@ -11,7 +11,9 @@ import { publicPath } from "../util/paths.js";
 import { prepareSandboxWorkspace } from "../security/sandbox.js";
 import { runHuntLoop } from "./loop.js";
 import { ProjectMemory } from "./memory.js";
+import { isPiSessionProvider, runHuntSession } from "./pi-session.js";
 import { prepareWorkspaceToolchain } from "./prepare.js";
+import type { TranscriptStep } from "./prompts.js";
 import { buildTools, ingestFindingsFromScratch, newSession, type AgentFinding, type ToolContext } from "./tools.js";
 
 // Orchestrates one autonomous hunt: load authorized material, give the model the
@@ -49,44 +51,68 @@ export async function runHunt(
 
   if (source.length === 0) throw new Error("hunt requires at least one source file (use --source)");
 
-  const llm = options.llm ?? createLlmClient(cfg, logger);
-  if (llm && "setLogger" in llm && typeof (llm as { setLogger?: unknown }).setLogger === "function") {
-    (llm as { setLogger(logger: RunLogger): void }).setLogger(logger);
-  }
-
   const memory = new ProjectMemory(path.join(projectHistoryDir(historyLocation(cfg)), "memory.jsonl"));
   const session = newSession();
   const tools = buildTools();
   const ctx: ToolContext = { cfg, source, corpus, memory, logger, session };
 
-  // Warm-up guarantee: prepare the toolchain once (deps fetched/built) so the
-  // model's later test runs can actually compile and confirm. Create the shared
-  // workspace up front so prepare and the tools operate on the same copy.
-  if (cfg.huntPrepare && cfg.sourcePaths.length > 0) {
+  // Create the shared isolated workspace up front. It is the sandbox for tools,
+  // the cwd for the agent session, and the surface the warm-up prepares.
+  let workspaceCwd = process.cwd();
+  if (cfg.sourcePaths.length > 0) {
     const workspace = await prepareSandboxWorkspace(cfg.sourcePaths, logger.runDir, "hunt/workspace");
     session.workspace = workspace;
-    await prepareWorkspaceToolchain({ workspace, cfg, logger });
+    workspaceCwd = workspace.absolute;
+    // Warm-up guarantee: prepare the toolchain once (deps fetched/built) so the
+    // model's later test runs can actually compile and confirm.
+    if (cfg.huntPrepare) await prepareWorkspaceToolchain({ workspace, cfg, logger });
   }
 
   const scopeNote = resolveScopeNote(cfg);
   // Surface prior-run lessons at kickoff: the most relevant notes for this scope,
-  // falling back to the most recent ones so memory is always visible. The agent
-  // can still pull more with the recall tool.
+  // falling back to the most recent ones so memory is always visible.
   let memoryNotes = await memory.recall([cfg.targetName, scopeNote].filter(Boolean).join(" "), 8);
   if (memoryNotes.length === 0) memoryNotes = (await memory.all()).slice(-8).reverse();
   const memoryHint = renderMemoryHint(memoryNotes);
 
-  const loop = await runHuntLoop({
-    cfg,
-    llm,
-    tools,
-    ctx,
-    logger,
-    maxSteps: Math.max(1, Math.floor(cfg.huntMaxSteps)),
-    fileManifest: renderFileManifest(source),
-    ...(scopeNote ? { scopeNote } : {}),
-    ...(memoryHint ? { memoryHint } : {}),
-  });
+  // Driver choice: real pi providers (e.g. openai-codex) run a continuous
+  // AgentSession that owns the loop; the deterministic mock and CLI fallbacks use
+  // the legacy per-step complete() loop.
+  const useSession = !options.llm && isPiSessionProvider(cfg.provider);
+  let steps: TranscriptStep[];
+  let stoppedReason: string;
+  if (useSession) {
+    const result = await runHuntSession({
+      cfg,
+      ctx,
+      tools,
+      logger,
+      cwd: workspaceCwd,
+      fileManifest: renderFileManifest(source),
+      ...(scopeNote ? { scopeNote } : {}),
+      ...(memoryHint ? { memoryHint } : {}),
+    });
+    steps = result.steps;
+    stoppedReason = result.stoppedReason;
+  } else {
+    const llm = options.llm ?? createLlmClient(cfg, logger);
+    if (llm && "setLogger" in llm && typeof (llm as { setLogger?: unknown }).setLogger === "function") {
+      (llm as { setLogger(logger: RunLogger): void }).setLogger(logger);
+    }
+    const loop = await runHuntLoop({
+      cfg,
+      llm,
+      tools,
+      ctx,
+      logger,
+      maxSteps: Math.max(1, Math.floor(cfg.huntMaxSteps)),
+      fileManifest: renderFileManifest(source),
+      ...(scopeNote ? { scopeNote } : {}),
+      ...(memoryHint ? { memoryHint } : {}),
+    });
+    steps = loop.steps;
+    stoppedReason = loop.stoppedReason;
+  }
 
   const findingParse = ingestFindingsFromScratch(session);
   if (findingParse.errors.length > 0) {
@@ -101,12 +127,12 @@ export async function runHunt(
   const confirmed = session.findings.filter((finding) => finding.confirmationStatus === "confirmed-executable");
   const hypotheses = session.findings.filter((finding) => finding.confirmationStatus !== "confirmed-executable");
 
-  await logger.artifact("hunt_transcript.json", { stoppedReason: loop.stoppedReason, steps: loop.steps });
+  await logger.artifact("hunt_transcript.json", { stoppedReason, steps });
   await logger.artifact("hunt_findings.json", confirmed);
   await logger.artifact("hunt_hypotheses.json", hypotheses);
   await logger.artifact("hunt_command_runs.json", session.commandRuns);
 
-  const summary = buildSummary(confirmed, hypotheses, loop.steps);
+  const summary = buildSummary(confirmed, hypotheses, steps);
   await logger.artifact("summary.json", summary);
 
   for (const finding of summary.findings) {
@@ -116,8 +142,8 @@ export async function runHunt(
   await persistFindingMemory(memory, confirmed, hypotheses);
 
   await logger.event("hunt_done", {
-    stoppedReason: loop.stoppedReason,
-    steps: loop.steps.length,
+    stoppedReason,
+    steps: steps.length,
     findings: confirmed.length,
     hypotheses: hypotheses.length,
     confirmedExecutable: confirmed.length,

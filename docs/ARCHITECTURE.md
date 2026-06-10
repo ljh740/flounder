@@ -101,9 +101,18 @@ Per-target memory lives at `<out>/history/<target>/memory.jsonl`. Hunt surfaces 
 
 Project history lives under `<out>/history/<target>/manifest.json` and records sanitized run metadata, findings, and materials. Paths must stay repository-relative or placeholder-based in public-facing artifacts.
 
+## Drivers
+
+Hunt has two interchangeable drivers behind the same tools, sandbox, confirmation gate, and artifacts:
+
+- Continuous session (`src/agent/pi-session.ts`, default for real runs): a pi-coding-agent `AgentSession` owns the loop. The framework registers only the sandboxed tools as the session's `customTools` (with `noTools: "all"`, so pi's built-in filesystem tools are disabled) and calls `session.prompt()` once; the session keeps context server-side and orchestrates tool calls natively. This avoids the per-step transcript resend that grows quadratically and exhausts quota. Used whenever the provider is a real pi-ai provider.
+- Legacy loop (`src/agent/loop.ts`): the framework re-drives a stateless `complete()` once per step with a JSON action protocol. Used for the deterministic mock (offline tests) and the explicit CLI fallbacks.
+
+The default hunt provider is `openai-codex` (`gpt-5.5`). The continuous session requires pi to be authenticated for that provider (`pi` → `/login`); pi does not reuse the standalone codex CLI's credentials, so an unauthenticated run fails fast with an actionable message (use `--mock-llm` for offline checks). Per project constraint, the session driver targets pi providers such as `openai-codex`; `claude-code` is not used as a session backend (it is not permitted outside Claude apps and needs no API key here).
+
 ## Provider Behavior
 
-Model calls use pi-ai providers by default. `provider=codex-cli` and `provider=claude-code` are explicit local CLI fallbacks. CLI fallbacks run non-interactively and must preserve the hunt contract: in agentic mode they must not inject "do not inspect files" instructions, because the framework tools are how the model investigates.
+`provider=codex-cli` and `provider=claude-code` are explicit local CLI fallbacks that run through the legacy loop. CLI fallbacks run non-interactively and must preserve the hunt contract: in agentic mode they must not inject "do not inspect files" instructions, because the framework tools are how the model investigates.
 
 Model and provider selection stays runtime-configured. Do not assume every model family is available through every provider.
 

@@ -81,7 +81,7 @@ export function defaultConfig(): AuditorConfig {
     sourcePaths: [],
     corpusPaths: [],
     outputDir: "runs",
-    provider: "openai",
+    provider: "openai-codex",
     enumModel: "gpt-5.5",
     auditModel: "gpt-5.5",
     verifyModel: "gpt-5.5",

@@ -7,6 +7,7 @@ import { defaultConfig } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, ingestFindingsFromScratch, newSession } from "../dist/agent/tools.js";
 import { runHunt } from "../dist/agent/hunt.js";
+import { isPiSessionProvider } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 
@@ -26,6 +27,14 @@ async function tempLogger(baseDir) {
 function tool(name) {
   return buildTools().find((entry) => entry.name === name);
 }
+
+test("driver routing: real pi providers use the continuous session, mock/CLI fallbacks use the loop", () => {
+  assert.equal(isPiSessionProvider("openai-codex"), true);
+  assert.equal(isPiSessionProvider("claude-code"), false);
+  assert.equal(isPiSessionProvider("codex-cli"), false);
+  assert.equal(isPiSessionProvider("mock"), false);
+  assert.equal(isPiSessionProvider("not-a-real-provider"), false);
+});
 
 test("project memory persists notes and recalls by keyword overlap", async () => {
   const dir = await tempDir();
