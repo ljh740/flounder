@@ -7,7 +7,7 @@ import { defaultConfig } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, ingestFindingsFromScratch, newSession } from "../dist/agent/tools.js";
 import { runHunt } from "../dist/agent/hunt.js";
-import { runHuntLoop } from "../dist/agent/loop.js";
+import { runHuntLoop, isTransientError } from "../dist/agent/loop.js";
 import { runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
 import { isPiSessionProvider, mapThinkingLevel } from "../dist/agent/pi-session.js";
@@ -197,6 +197,18 @@ test("baseline integrity: the model cannot modify the target source under audit"
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("transient-throttle classification: server rate limits retry, real quota exhaustion does not", () => {
+  // The exact message from a provider-side throttle — must be treated as transient.
+  assert.equal(isTransientError("claude exited: API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"), true);
+  assert.equal(isTransientError("HTTP 429 Too Many Requests"), true);
+  assert.equal(isTransientError("Service overloaded, please retry"), true);
+  assert.equal(isTransientError("socket hang up"), true);
+  // A genuine daily usage-limit exhaustion is NOT transient — retrying is futile.
+  assert.equal(isTransientError("You have hit your usage limit for today"), false);
+  assert.equal(isTransientError("monthly quota exceeded"), false);
+  assert.equal(isTransientError("invalid JSON in tool action"), false);
 });
 
 test("independent refutation: a skeptic verdict is attached to each confirmed finding", async () => {

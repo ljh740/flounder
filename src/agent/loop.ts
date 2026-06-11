@@ -26,7 +26,10 @@ export async function runHuntLoop(input: {
   scopeNote?: string;
   fileManifest: string;
   memoryHint?: string;
+  /** Base backoff for transient-throttle retries; overridable for tests. */
+  transientRetryBaseMs?: number;
 }): Promise<HuntLoopResult> {
+  const transientRetryBaseMs = input.transientRetryBaseMs ?? 4000;
   const toolsByName = new Map(input.tools.map((tool) => [tool.name, tool]));
   const kickoff = buildHuntKickoff({
     target: input.cfg.targetName,
@@ -80,19 +83,38 @@ export async function runHuntLoop(input: {
         ? "\nALMOST OUT OF STEPS — do not open new investigations. Write findings.json NOW with any confirmed findings AND your best unconfirmed hypotheses (each with location and why it is suspected), then emit done. Unrecorded hypotheses are lost."
         : "";
     const user = `${kickoff}\n\n===== TRANSCRIPT SO FAR =====\n${renderTranscript(steps)}\n\n===== YOUR NEXT ACTION =====\n${budgetLine}${finalizeLine}\nRespond with one JSON tool action or done object.`;
-    let raw: string;
-    try {
-      raw = await input.llm.complete({
-        tag: "hunt",
-        system: HUNT_SYSTEM,
-        user,
-        model: input.cfg.auditModel,
-        maxTokens: input.cfg.maxTokens,
-        thinkingLevel: input.cfg.thinkingLevel,
-        agentic: true,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    // Transient throttles (provider rate limits, overload, timeouts) are retried
+    // with backoff rather than counted toward the stall guard — a short server-side
+    // rate limit should not kill a whole run.
+    let raw: string | undefined;
+    let modelError: unknown;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        raw = await input.llm.complete({
+          tag: "hunt",
+          system: HUNT_SYSTEM,
+          user,
+          model: input.cfg.auditModel,
+          maxTokens: input.cfg.maxTokens,
+          thinkingLevel: input.cfg.thinkingLevel,
+          agentic: true,
+        });
+        modelError = undefined;
+        break;
+      } catch (error) {
+        modelError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (isTransientError(message) && attempt < MAX_TRANSIENT_RETRIES) {
+          const waitMs = Math.min(60_000, transientRetryBaseMs * 2 ** attempt);
+          await input.logger.event("hunt_transient_retry", { step: n, attempt: attempt + 1, waitMs });
+          await sleep(waitMs);
+          continue;
+        }
+        break;
+      }
+    }
+    if (raw === undefined) {
+      const message = modelError instanceof Error ? modelError.message : String(modelError);
       await input.logger.event("hunt_model_error", { step: n, error: message.slice(0, 500) });
       steps.push({ n, thought: "", tool: "(model-error)", args: {}, observation: `model error: ${message.slice(0, 300)}` });
       if (++consecutiveParseErrors >= 3) return { steps, stoppedReason: "stalled" };
@@ -155,6 +177,23 @@ export async function runHuntLoop(input: {
 
   await finalizeFindings();
   return { steps, stoppedReason: "step-budget" };
+}
+
+const MAX_TRANSIENT_RETRIES = 5;
+
+// A transient throttle (provider-side rate limit, overload, gateway/timeout) is
+// retryable and should not count toward the stall guard. A genuine usage-limit
+// exhaustion is NOT transient (the daily quota is gone) — it falls through to the
+// stall path, where retrying would also fail.
+export function isTransientError(message: string): boolean {
+  const m = message.toLowerCase();
+  if (m.includes("not your usage limit")) return true; // explicit transient server throttle
+  if (m.includes("usage limit") || m.includes("quota")) return false; // real exhaustion
+  return /\b429\b|\b502\b|\b503\b|\b504\b|rate.?limit|temporarily|overloaded|timed? ?out|timeout|econnreset|etimedout|socket hang up/.test(m);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface ParsedAction {
