@@ -31,6 +31,9 @@ export interface AuditorConfig {
   huntMapSteps: number;
   huntDigSteps: number;
   huntMaxScopes: number;
+  // Re-enumerate the scope inventory from scratch instead of resuming the
+  // persisted one (which would otherwise continue with the next un-audited scopes).
+  huntRemap: boolean;
   // Per-role model assignment. A role (map/dig/refute) resolves to its own entry,
   // else `default`, else the top-level provider/auditModel/thinkingLevel. Nothing
   // is auto-downgraded: an unspecified role inherits the main model.
@@ -109,6 +112,7 @@ export function defaultConfig(): AuditorConfig {
     huntMapSteps: 20,
     huntDigSteps: 30,
     huntMaxScopes: 6,
+    huntRemap: false,
     dryRun: false,
   };
 }

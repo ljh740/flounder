@@ -9,7 +9,9 @@ export class RunLogger {
   #callSeq = 0;
 
   constructor(baseDir: string, targetName: string, now = new Date(), options: { runDir?: string; streamEvents?: boolean } = {}) {
-    const ts = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    // Millisecond precision so two runs of the same target seconds apart still get
+    // distinct run directories (e.g. resuming the map → dig flow back-to-back).
+    const ts = now.toISOString().replace(/[-:.]/g, "");
     this.runDir = options.runDir ? path.resolve(options.runDir) : path.join(baseDir, `${targetName}-${ts}`);
     this.callsDir = path.join(this.runDir, "calls");
     this.eventsPath = path.join(this.runDir, "events.jsonl");

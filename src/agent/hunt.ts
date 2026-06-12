@@ -13,6 +13,7 @@ import { runDifferentialConfirmation, type DifferentialResult } from "./differen
 import { runRefutation } from "./refutation.js";
 import { runHuntLoop } from "./loop.js";
 import { ProjectMemory } from "./memory.js";
+import { loadScopeInventory, saveScopeInventory, scopeProgress } from "./scope-store.js";
 import { isPiSessionProvider, runHuntSession } from "./pi-session.js";
 import type { TranscriptStep } from "./prompts.js";
 import { buildTools, clearScratchFindings, ingestFindingsFromScratch, newSession, readScratchScopes, type AgentFinding, type AuditScope, type ToolContext } from "./tools.js";
@@ -26,6 +27,8 @@ import { buildTools, clearScratchFindings, ingestFindingsFromScratch, newSession
 export interface HuntResult {
   runDir: string;
   summary: AuditSummary;
+  /** Scope-inventory coverage for the resumable map → dig flow (omitted otherwise). */
+  scopeCoverage?: { total: number; audited: number; pending: number };
 }
 
 export async function runHunt(
@@ -137,19 +140,34 @@ export async function runHunt(
   let scopeInventory: AuditScope[] = [];
 
   if (cfg.huntDeep && !cfg.huntDeepFocus) {
-    // MAP → DIG: map enumerates the full scope inventory; dig deep-audits the top
-    // scopes one at a time. Nothing is silently dropped — scopes past the cap are
-    // recorded as deferred. Findings from each dig are accumulated and tagged.
-    const mapPhase = await runPhase(withRole(cfg, "map"), { mode: "map", maxSteps: cfg.huntMapSteps });
-    scopeInventory = readScratchScopes(session);
-    await logger.event("hunt_map_done", { scopes: scopeInventory.length });
-    clearScratchFindings(session);
+    // MAP → DIG, resumable. The complete scope inventory is persisted under the
+    // project history dir; each run deep-audits the next batch of un-audited
+    // scopes and updates their status. Re-running the same command therefore
+    // continues with the scopes not yet audited instead of re-mapping or
+    // re-digging. --remap discards the persisted inventory and enumerates afresh.
+    const inventoryDir = projectHistoryDir(historyLocation(cfg));
+    const aggregatedSteps: TranscriptStep[] = [];
+    scopeInventory = cfg.huntRemap ? [] : await loadScopeInventory(inventoryDir);
+    const resuming = scopeInventory.length > 0;
+    if (!resuming) {
+      const mapPhase = await runPhase(withRole(cfg, "map"), { mode: "map", maxSteps: cfg.huntMapSteps });
+      scopeInventory = readScratchScopes(session);
+      aggregatedSteps.push(...mapPhase.steps);
+      await logger.event("hunt_map_done", { scopes: scopeInventory.length });
+      clearScratchFindings(session);
+    } else {
+      await logger.event("hunt_map_resumed", { ...scopeProgress(scopeInventory) });
+    }
+    for (const scope of scopeInventory) if (!scope.status) scope.status = "pending";
 
     const digCfg = withRole(cfg, "dig");
-    const toDig = scopeInventory.slice(0, Math.max(1, cfg.huntMaxScopes));
-    for (const scope of scopeInventory.slice(toDig.length)) scope.status = "deferred";
+    // Audit the highest-scored scopes not yet audited; the rest stay pending for
+    // a future run (visible, never silently dropped).
+    const toDig = scopeInventory
+      .filter((scope) => scope.status !== "audited")
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, cfg.huntMaxScopes));
     const aggregated: AgentFinding[] = [];
-    const aggregatedSteps: TranscriptStep[] = [...mapPhase.steps];
     for (const scope of toDig) {
       clearScratchFindings(session);
       const dig = await runPhase(digCfg, {
@@ -171,7 +189,9 @@ export async function runHunt(
     manualFindings = true;
     steps = aggregatedSteps;
     stoppedReason = "finished";
+    await saveScopeInventory(inventoryDir, scopeInventory);
     await logger.artifact("hunt_scopes.json", scopeInventory);
+    await logger.event("hunt_scope_progress", { ...scopeProgress(scopeInventory), resumed: resuming });
   } else {
     // Single run: breadth (default role) or a pinned deep-focus dig (dig role).
     const pinned = Boolean(cfg.huntDeep && cfg.huntDeepFocus);
@@ -274,7 +294,11 @@ export async function runHunt(
     manifest: publicPath(projectHistoryManifestPath(historyLocation(cfg))),
   });
 
-  return { runDir: logger.runDir, summary };
+  return {
+    runDir: logger.runDir,
+    summary,
+    ...(scopeInventory.length > 0 ? { scopeCoverage: scopeProgress(scopeInventory) } : {}),
+  };
 }
 
 function buildSummary(confirmed: AgentFinding[], hypotheses: AgentFinding[], steps: { tool: string }[]): AuditSummary {

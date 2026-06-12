@@ -26,6 +26,10 @@ async function main(argv: string[]): Promise<void> {
       ...(hasFlag(rest, "--mock-llm") ? { llm: new MockAuditLlmClient() } : {}),
     });
     printCoverage(result.runDir, result.summary.coverage);
+    if (result.scopeCoverage) {
+      const { total, audited, pending } = result.scopeCoverage;
+      console.log(`[scopes] audited ${audited}/${total}` + (pending > 0 ? `, ${pending} pending — run the same command again to audit the next batch (or --remap to re-enumerate).` : " — inventory fully audited."));
+    }
     return;
   }
 
@@ -60,6 +64,7 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   cfg.huntMaxScopes = readIntFlag(args, "--max-scopes") ?? cfg.huntMaxScopes;
   cfg.huntMapSteps = readIntFlag(args, "--map-steps") ?? cfg.huntMapSteps;
   cfg.huntDigSteps = readIntFlag(args, "--dig-steps") ?? cfg.huntDigSteps;
+  if (args.includes("--remap")) cfg.huntRemap = true;
   const deepFocus = readFlag(args, "--deep-focus");
   if (deepFocus !== undefined) {
     cfg.huntDeep = true;
@@ -208,9 +213,10 @@ Options:
   --no-refute             hunt: skip the independent-refutation pass on confirmed findings
   --deep                  hunt: map → dig flow (map enumerates scopes, dig deep-audits the top ones)
   --deep-focus <path>     hunt: skip map and deep-audit one pinned region (implies --deep)
-  --max-scopes <n>        hunt: how many top scopes the dig phase deep-audits, default 6
+  --max-scopes <n>        hunt: how many un-audited scopes the dig phase audits per run, default 6
   --map-steps <n>         hunt: action budget for the map phase, default 20
   --dig-steps <n>         hunt: per-scope action budget for the dig phase, default 30
+  --remap                 hunt: re-enumerate scopes from scratch (default resumes the persisted inventory)
   --mock-llm              run with the deterministic mock model
 `);
 }

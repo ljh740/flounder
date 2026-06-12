@@ -53,6 +53,16 @@ function huntActionFor(user: string): string {
             score: 9,
             why: "assign_advice writes a prover-controlled value that downstream checks trust, with no visible equality edge.",
           },
+          {
+            id: "S2",
+            obligation: "secondary advice region must bind to its source",
+            region: "halo2_missing_constraint.rs:5",
+            lenses: ["unbound-input"],
+            exposure: "high",
+            difficulty: "medium",
+            score: 7,
+            why: "a second enumerated scope so coverage spans more than one dig batch.",
+          },
         ]),
       });
     }

@@ -458,16 +458,20 @@ test("map → dig: --deep enumerates scopes then deep-audits each, tagging findi
     cfg.huntDeep = true; // map → dig flow (no pinned focus)
     cfg.huntMapSteps = 6;
     cfg.huntDigSteps = 8;
-    cfg.huntMaxScopes = 3;
+    cfg.huntMaxScopes = 1; // audit only the top scope this run; the rest stay pending
 
-    const { runDir, summary } = await runHunt(cfg, { llm: new MockAuditLlmClient() });
+    const { runDir, summary, scopeCoverage } = await runHunt(cfg, { llm: new MockAuditLlmClient() });
 
-    // The map phase wrote a scope inventory the dig phase consumed.
+    // The map phase wrote the full scope inventory; dig audited only the top one.
     const scopes = JSON.parse(await readFile(path.join(runDir, "hunt_scopes.json"), "utf8"));
-    assert.equal(scopes.length, 1);
-    assert.equal(scopes[0].status, "audited", "a scope within the cap is deep-audited, not deferred");
+    assert.equal(scopes.length, 2, "map enumerates the complete inventory");
+    const s1 = scopes.find((s) => s.id === "S1");
+    const s2 = scopes.find((s) => s.id === "S2");
+    assert.equal(s1.status, "audited", "the highest-scored scope is audited");
+    assert.equal(s2.status, "pending", "scopes beyond the cap stay pending (not dropped)");
+    assert.deepEqual(scopeCoverage, { total: 2, audited: 1, pending: 1 });
 
-    // Dig deep-audited the scope and produced the confirmed finding, tagged by scope.
+    // Dig produced the confirmed finding, tagged by the scope it came from.
     assert.equal(summary.findings.length, 1);
     assert.equal(summary.findings[0].confirmationStatus, "confirmed-executable");
     const findingsArtifact = JSON.parse(await readFile(path.join(runDir, "hunt_findings.json"), "utf8"));
@@ -475,4 +479,47 @@ test("map → dig: --deep enumerates scopes then deep-audits each, tagging findi
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("map → dig is resumable: a second run skips map and audits the next pending scope", async () => {
+  const dir = await tempDir();
+  try {
+    const base = {
+      targetName: "resume-e2e",
+      sourcePaths: [fixtures],
+      corpusPaths: [fixtures],
+      outputDir: path.join(dir, "runs"),
+      huntDeep: true,
+      huntMapSteps: 6,
+      huntDigSteps: 8,
+      huntMaxScopes: 1,
+    };
+
+    // Run 1: map enumerates S1+S2, dig audits S1, S2 left pending.
+    const run1 = await runHunt({ ...defaultConfig(), ...base }, { llm: new MockAuditLlmClient() });
+    assert.deepEqual(run1.scopeCoverage, { total: 2, audited: 1, pending: 1 });
+    const events1 = (await readFile(path.join(run1.runDir, "events.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(events1.some((e) => e.kind === "hunt_map_done"), "run 1 enumerates the inventory");
+
+    // Run 2: same target/out → resume. No new map; audits the next pending scope (S2).
+    const run2 = await runHunt({ ...defaultConfig(), ...base }, { llm: new MockAuditLlmClient() });
+    assert.deepEqual(run2.scopeCoverage, { total: 2, audited: 2, pending: 0 }, "the second run completes coverage");
+    const events2 = (await readFile(path.join(run2.runDir, "events.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(!events2.some((e) => e.kind === "hunt_map_done"), "run 2 must not re-run the map phase");
+    assert.ok(events2.some((e) => e.kind === "hunt_map_resumed"), "run 2 resumes the persisted inventory");
+    const run2Findings = JSON.parse(await readFile(path.join(run2.runDir, "hunt_findings.json"), "utf8"));
+    assert.equal(run2Findings[0]?.scopeId, "S2", "run 2 audits the previously-pending scope (S2)");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("hunt run directories are unique to the millisecond so rapid same-target runs do not collide", () => {
+  // Regression for the resumable flow running back-to-back within one second.
+  const t = new Date("2026-06-12T01:22:54.123Z");
+  const t2 = new Date("2026-06-12T01:22:54.789Z");
+  const a = new RunLogger("/tmp/x", "tgt", t).runDir;
+  const b = new RunLogger("/tmp/x", "tgt", t2).runDir;
+  assert.notEqual(a, b, "two runs in the same second must get distinct directories");
+  assert.match(a, /tgt-20260612T012254123Z$/);
 });
