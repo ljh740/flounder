@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { defaultConfig, normalizeProjectContext, type AuditorConfig } from "./config.js";
+import { defaultConfig, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
 import { runHunt } from "./agent/hunt.js";
 import { MockAuditLlmClient } from "./llm/mock.js";
 import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/history.js";
@@ -106,6 +106,8 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (raw.thinkingLevel === "minimal" || raw.thinkingLevel === "low" || raw.thinkingLevel === "medium" || raw.thinkingLevel === "high" || raw.thinkingLevel === "xhigh") {
     cfg.thinkingLevel = raw.thinkingLevel;
   }
+  const rawModels = normalizeRoleModels(raw.models);
+  if (rawModels) cfg.models = rawModels;
   if ("projectContext" in raw || "project_context" in raw) {
     cfg.projectContext = normalizeProjectContext(raw.projectContext ?? raw.project_context) ?? cfg.projectContext;
   }

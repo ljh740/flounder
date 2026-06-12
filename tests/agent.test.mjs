@@ -3,7 +3,7 @@ import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promise
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { defaultConfig } from "../dist/config.js";
+import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, ingestFindingsFromScratch, newSession } from "../dist/agent/tools.js";
 import { runHunt } from "../dist/agent/hunt.js";
@@ -198,6 +198,36 @@ test("baseline integrity: the model cannot modify the target source under audit"
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("per-role model config: role entry overrides default overrides top-level, nothing auto-downgraded", () => {
+  const cfg = defaultConfig();
+  cfg.provider = "claude-code";
+  cfg.auditModel = "claude-opus-4-8";
+  cfg.thinkingLevel = "high";
+  // No models block → every role inherits the top-level model (map is NOT downgraded).
+  assert.deepEqual(resolveRole(cfg, "map"), { provider: "claude-code", model: "claude-opus-4-8", thinking: "high" });
+  assert.deepEqual(resolveRole(cfg, "dig"), { provider: "claude-code", model: "claude-opus-4-8", thinking: "high" });
+
+  cfg.models = normalizeRoleModels({
+    default: { thinking: "high" },
+    dig: { thinking: "xhigh" },
+    refute: { provider: "openai-codex", model: "gpt-5.5" },
+    bogus: { provider: "x" }, // ignored — not a known role
+    map: { thinking: "not-a-level" }, // invalid thinking dropped, entry has no fields → omitted
+  });
+  // dig bumps thinking to xhigh, keeps inherited provider/model.
+  assert.deepEqual(resolveRole(cfg, "dig"), { provider: "claude-code", model: "claude-opus-4-8", thinking: "xhigh" });
+  // refute switches provider+model (the claude-code → codex switch the user wants), inherits thinking from default.
+  assert.deepEqual(resolveRole(cfg, "refute"), { provider: "openai-codex", model: "gpt-5.5", thinking: "high" });
+  // map's only field was an invalid thinking → entry omitted → falls back to default/top-level.
+  assert.equal(resolveRole(cfg, "map").thinking, "high");
+  assert.equal(cfg.models.bogus, undefined);
+
+  // withRole specializes the config in place for role-agnostic callers.
+  const digCfg = withRole(cfg, "dig");
+  assert.equal(digCfg.thinkingLevel, "xhigh");
+  assert.equal(digCfg.auditModel, "claude-opus-4-8");
 });
 
 test("deep mode: obligation-driven prompt enforces design-intent enumeration and pins a focus region", () => {

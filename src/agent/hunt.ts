@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { AuditorConfig } from "../config.js";
+import { withRole, type AuditorConfig } from "../config.js";
 import { loadCorpus, loadSource } from "../ingest/source.js";
 import { createLlmClient } from "../llm/client.js";
 import { renderDisclosure, reportArtifactName } from "../reports/disclosure.js";
@@ -88,12 +88,15 @@ export async function runHunt(
   // AgentSession that owns the loop; the deterministic mock and CLI fallbacks use
   // the legacy per-step complete() loop.
   const fileManifest = renderFileManifest(source, corpusManifest);
-  const useSession = !options.llm && isPiSessionProvider(cfg.provider);
+  // The main hunt runs on the `default` role's model; the driver (continuous pi
+  // session vs per-step loop) is chosen from that role's resolved provider.
+  const mainCfg = withRole(cfg, "default");
+  const useSession = !options.llm && isPiSessionProvider(mainCfg.provider);
   let steps: TranscriptStep[];
   let stoppedReason: string;
   if (useSession) {
     const result = await runHuntSession({
-      cfg,
+      cfg: mainCfg,
       ctx,
       tools,
       logger,
@@ -107,12 +110,12 @@ export async function runHunt(
     steps = result.steps;
     stoppedReason = result.stoppedReason;
   } else {
-    const llm = options.llm ?? createLlmClient(cfg, logger);
+    const llm = options.llm ?? createLlmClient(mainCfg, logger);
     if (llm && "setLogger" in llm && typeof (llm as { setLogger?: unknown }).setLogger === "function") {
       (llm as { setLogger(logger: RunLogger): void }).setLogger(logger);
     }
     const loop = await runHuntLoop({
-      cfg,
+      cfg: mainCfg,
       llm,
       tools,
       ctx,
@@ -158,8 +161,9 @@ export async function runHunt(
   if (cfg.huntRefute) {
     const candidates = session.findings.filter((finding) => isConfirmed(finding.confirmationStatus));
     if (candidates.length > 0) {
-      const refuteLlm = options.llm ?? createLlmClient(cfg, logger);
-      const verdicts = await runRefutation({ findings: candidates, source, cfg, llm: refuteLlm, logger, max: 8 });
+      const refuteCfg = withRole(cfg, "refute");
+      const refuteLlm = options.llm ?? createLlmClient(refuteCfg, logger);
+      const verdicts = await runRefutation({ findings: candidates, source, cfg: refuteCfg, llm: refuteLlm, logger, max: 8 });
       for (const finding of candidates) {
         if (!finding.refutation?.refuted) continue;
         if (finding.confirmationStatus === "confirmed-executable") finding.confirmationStatus = "suspected";

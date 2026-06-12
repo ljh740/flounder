@@ -26,7 +26,60 @@ export interface AuditorConfig {
   // picks the most soundness-critical region itself.
   huntDeep: boolean;
   huntDeepFocus?: string;
+  // Per-role model assignment. A role (map/dig/refute) resolves to its own entry,
+  // else `default`, else the top-level provider/auditModel/thinkingLevel. Nothing
+  // is auto-downgraded: an unspecified role inherits the main model.
+  models?: Partial<Record<HuntRole, Partial<RoleModel>>>;
   dryRun: boolean;
+}
+
+// The phases that may run on different models. `map` = scope enumeration,
+// `dig` = per-scope deep audit, `refute` = independent refutation, `default` =
+// everything else / fallback.
+export type HuntRole = "default" | "map" | "dig" | "refute";
+
+export interface RoleModel {
+  provider: string;
+  model: string;
+  thinking: AuditorConfig["thinkingLevel"];
+}
+
+const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+
+/** Resolve the effective model for a phase: role entry → `default` entry → top-level config. */
+export function resolveRole(cfg: AuditorConfig, role: HuntRole): RoleModel {
+  const roleCfg = cfg.models?.[role] ?? {};
+  const def = cfg.models?.default ?? {};
+  return {
+    provider: roleCfg.provider ?? def.provider ?? cfg.provider,
+    model: roleCfg.model ?? def.model ?? cfg.auditModel,
+    thinking: roleCfg.thinking ?? def.thinking ?? cfg.thinkingLevel,
+  };
+}
+
+/** A copy of the config specialized to a role's model, so role-agnostic callers stay unchanged. */
+export function withRole(cfg: AuditorConfig, role: HuntRole): AuditorConfig {
+  const resolved = resolveRole(cfg, role);
+  return { ...cfg, provider: resolved.provider, auditModel: resolved.model, thinkingLevel: resolved.thinking };
+}
+
+/** Parse a config-file `models` block into the validated per-role shape. */
+export function normalizeRoleModels(input: unknown): AuditorConfig["models"] | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const out: Partial<Record<HuntRole, Partial<RoleModel>>> = {};
+  for (const role of ["default", "map", "dig", "refute"] as HuntRole[]) {
+    const raw = (input as Record<string, unknown>)[role];
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const entry: Partial<RoleModel> = {};
+    if (typeof r.provider === "string" && r.provider.trim()) entry.provider = r.provider.trim();
+    if (typeof r.model === "string" && r.model.trim()) entry.model = r.model.trim();
+    if (typeof r.thinking === "string" && (THINKING_LEVELS as readonly string[]).includes(r.thinking)) {
+      entry.thinking = r.thinking as RoleModel["thinking"];
+    }
+    if (Object.keys(entry).length > 0) out[role] = entry;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
 }
 
 export function defaultConfig(): AuditorConfig {
