@@ -557,7 +557,14 @@ function normalizeBashCommand(
     if (!normalizedCwd) return { error: 'error: "cwd" must be a safe relative path.' };
     command.cwd = normalizedCwd;
   }
-  command.timeoutMs = clampInt(args.timeout_ms ?? args.timeoutMs, 1000, cfg.reproductionCommandTimeoutMs, cfg.reproductionCommandTimeoutMs);
+  // Build/test runners compile (often minutes for large dependency trees), so they
+  // get the build-grade timeout ceiling and default; quick inspection commands keep
+  // the short timeout. Without this a real `cargo test`/`go test` confirm cannot
+  // finish its cold compile within the 120s inspect budget.
+  const compiles = isAgentBuildCommand(command) || isAgentConfirmCommand(command);
+  const ceilingMs = compiles ? Math.max(cfg.reproductionCommandTimeoutMs, cfg.huntPrepareTimeoutMs) : cfg.reproductionCommandTimeoutMs;
+  const defaultMs = compiles ? ceilingMs : cfg.reproductionCommandTimeoutMs;
+  command.timeoutMs = clampInt(args.timeout_ms ?? args.timeoutMs, 1000, ceilingMs, defaultMs);
   command.expectedExitCode = clampInt(args.expected_exit_code ?? args.expectedExitCode, 0, 255, 0);
   return { raw, command, successPatterns: asStringList(args.success_patterns), purpose: asEnum(args.purpose, ["inspect", "build", "confirm"], "inspect") };
 }
