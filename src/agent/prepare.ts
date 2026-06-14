@@ -99,6 +99,21 @@ async function detectToolchains(workspaceAbsolute: string): Promise<ToolchainPla
   };
   const has = (name: string): boolean => manifests.some((entry) => entry.name === name);
 
+  // Order matters: dependency-install toolchains (npm/pnpm/yarn) run FIRST, because
+  // a Solidity/Foundry project often imports its dependencies (e.g. @openzeppelin)
+  // from node_modules — so `forge build` only resolves after `npm install`. Then go
+  // mod download, then the compile toolchains (cargo, forge).
+  const pkgDir = shallowest((name) => name === "package.json");
+  if (pkgDir !== undefined) {
+    if (has("pnpm-lock.yaml")) plans.push({ toolchain: "pnpm", ...cwd(pkgDir), commands: [["pnpm", "install", "--frozen-lockfile"]] });
+    else if (has("yarn.lock")) plans.push({ toolchain: "yarn", ...cwd(pkgDir), commands: [["yarn", "install", "--frozen-lockfile"]] });
+    else if (has("package-lock.json")) plans.push({ toolchain: "npm", ...cwd(pkgDir), commands: [["npm", "install", "--no-audit", "--no-fund"]] });
+    else plans.push({ toolchain: "npm", ...cwd(pkgDir), commands: [["npm", "install", "--no-audit", "--no-fund"]] });
+  }
+
+  const goDir = shallowest((name) => name === "go.mod");
+  if (goDir !== undefined) plans.push({ toolchain: "go", ...cwd(goDir), commands: [["go", "mod", "download"]] });
+
   // Warm with `cargo build` (not `--tests`): it compiles the heavy runtime
   // dependency tree (the bulk of build time, which `cargo test` then reuses)
   // without trying to compile the model's scratch test files under tests/ — those
@@ -108,17 +123,6 @@ async function detectToolchains(workspaceAbsolute: string): Promise<ToolchainPla
 
   const foundryDir = shallowest((name) => name === "foundry.toml");
   if (foundryDir !== undefined) plans.push({ toolchain: "forge", ...cwd(foundryDir), commands: [["forge", "build"]] });
-
-  const goDir = shallowest((name) => name === "go.mod");
-  if (goDir !== undefined) plans.push({ toolchain: "go", ...cwd(goDir), commands: [["go", "mod", "download"]] });
-
-  const pkgDir = shallowest((name) => name === "package.json");
-  if (pkgDir !== undefined) {
-    if (has("pnpm-lock.yaml")) plans.push({ toolchain: "pnpm", ...cwd(pkgDir), commands: [["pnpm", "install", "--frozen-lockfile"]] });
-    else if (has("yarn.lock")) plans.push({ toolchain: "yarn", ...cwd(pkgDir), commands: [["yarn", "install", "--frozen-lockfile"]] });
-    else if (has("package-lock.json")) plans.push({ toolchain: "npm", ...cwd(pkgDir), commands: [["npm", "ci"]] });
-    else plans.push({ toolchain: "npm", ...cwd(pkgDir), commands: [["npm", "install"]] });
-  }
 
   return plans;
 }

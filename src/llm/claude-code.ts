@@ -20,22 +20,27 @@ export class ClaudeCodeClient implements LlmClient {
     if (!input.model) throw new Error("model is required");
     const tmp = await mkdtemp(path.join(os.tmpdir(), "fsa-claude-code-"));
     const system = renderSystemPrompt(input.system, input.agentic ?? false);
+    // NOTE: keep these flags aligned with the installed `claude` CLI. The provider
+    // is a pure text-completion backend: fsa parses the model's JSON action and runs
+    // the tool itself inside its sandbox, so the spawned `claude` must NOT use its own
+    // tools (that would emit non-JSON output and bypass the sandbox/confirmation gate).
+    // `--permission-mode default` (NOT bypassPermissions) is correct here — there are no
+    // tools to approve, and host harnesses (rightly) block bypassPermissions as an unsafe
+    // autonomous-agent spawn. The system prompt is appended because the CLI exposes
+    // `--append-system-prompt` (no replace flag); the appended instruction + disabled
+    // tools is sufficient to get a single JSON action per turn.
     const args = [
       "-p",
       "--model",
       input.model,
-      "--effort",
-      effortFor(input.thinkingLevel),
-      "--system-prompt",
+      "--append-system-prompt",
       system,
       "--output-format",
       "json",
-      "--tools",
-      "",
-      "--disable-slash-commands",
-      "--no-session-persistence",
+      "--disallowedTools",
+      DISABLED_CLAUDE_TOOLS,
       "--permission-mode",
-      "bypassPermissions",
+      "default",
     ];
 
     try {
@@ -95,12 +100,11 @@ ${system}
 `;
 }
 
-function effortFor(level: "minimal" | "low" | "medium" | "high" | "xhigh" | undefined): "low" | "medium" | "high" | "max" {
-  if (level === "minimal" || level === "low") return "low";
-  if (level === "medium") return "medium";
-  if (level === "high") return "high";
-  return "max";
-}
+// Built-in Claude Code tools to disable so the spawned `claude -p` is a pure
+// text completion that only emits the JSON action fsa expects (fsa executes the
+// real tool itself inside its sandbox).
+const DISABLED_CLAUDE_TOOLS =
+  "Bash Edit Write Read Glob Grep WebFetch WebSearch Task NotebookEdit TodoWrite SlashCommand KillShell BashOutput";
 
 function parseClaudeOutput(stdout: string): { text: string; meta: Record<string, unknown> } {
   const parsed = JSON.parse(stdout) as { result?: unknown; modelUsage?: unknown; usage?: unknown; total_cost_usd?: unknown; session_id?: unknown };
