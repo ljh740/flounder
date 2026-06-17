@@ -45,6 +45,9 @@ export class RunRecorder {
         model: cfg.auditModel,
         thinking: cfg.thinkingLevel,
         budgets: configSnapshot(cfg),
+        // The OS pid lets a supervising run-manager correlate this DB row to the process
+        // it spawned (and reconcile status if the process dies before finalize).
+        pid: process.pid,
       });
     } catch (error) {
       recorder.disable("start", error);

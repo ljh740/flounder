@@ -23,6 +23,7 @@ export * from "./llm/pi-ai.js";
 export * from "./reports/disclosure.js";
 export * from "./security/policy.js";
 export * from "./security/sandbox.js";
+export * from "./server/run-manager.js";
 export * from "./trace/history.js";
 export * from "./trace/last-run.js";
 export * from "./trace/logger.js";

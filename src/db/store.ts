@@ -271,6 +271,15 @@ export class MetadataStore {
     this.db.prepare("UPDATE run SET pid = ? WHERE id = ?").run(pid, runId);
   }
 
+  /** Mark a still-running run for this OS pid as ended (a supervisor saw the process exit
+   * without the run reaching `done`). No-op if it already finished. Returns rows changed. */
+  reconcileRunByPid(pid: number, status: RunStatus): number {
+    const info = this.db
+      .prepare("UPDATE run SET status = ?, ended_at = ? WHERE pid = ? AND status = 'running'")
+      .run(status, now(), pid);
+    return Number(info.changes);
+  }
+
   /** Live coverage update mid-run (so a UI shows mapped/audited progress as digs land). */
   updateRunCoverage(runId: number, coverage: Coverage): void {
     this.db
