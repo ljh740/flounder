@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { LlmClient } from "../types.js";
-import type { TranscriptStep } from "./prompts.js";
+import { AUDIT_CONFIRM_SYSTEM, type TranscriptStep } from "./prompts.js";
 import { readScratchScopes, scratchHasFindings, type AgentTool, type ToolContext } from "./tools.js";
 
 // Continuous-session driver (point 5). Instead of re-driving a stateless
@@ -46,6 +46,8 @@ export async function runAuditSession(input: {
   deepFocus?: string;
   map?: boolean;
   verify?: string;
+  /** Confirm mode: the open-world reproduce/consolidate/decide pass over a prior run's findings. */
+  confirm?: string;
 }): Promise<SessionDriverResult> {
   const model = getModelSafe(input.cfg.provider, input.cfg.auditModel);
   if (!model) throw new Error(`audit session: unknown provider/model ${input.cfg.provider}/${input.cfg.auditModel}`);
@@ -67,9 +69,14 @@ export async function runAuditSession(input: {
     sessionManager: SessionManager.inMemory(),
   });
 
-  // Budget: the continuous session runs until the model stops on its own. Cap the
-  // number of model turns so a real run cannot grow unbounded in cost/time.
-  const maxTurns = Math.max(1, Math.floor(input.cfg.auditMaxSteps));
+  // Budget: the continuous session runs until the model stops on its own. A finite
+  // auditMaxSteps caps the number of model turns so a run cannot grow unbounded in
+  // cost/time; a non-finite or <=0 value means NO turn cap (confirm's default — the
+  // run then ends only when the model emits done, or errors). With no cap the model
+  // owns when it is finished, so the prompt pushes it to reproduce early rather than
+  // survey indefinitely.
+  const unbounded = !Number.isFinite(input.cfg.auditMaxSteps) || input.cfg.auditMaxSteps <= 0;
+  const maxTurns = unbounded ? Number.POSITIVE_INFINITY : Math.max(1, Math.floor(input.cfg.auditMaxSteps));
   // Forced-finalize budget: the loop driver nudges and force-writes when its step
   // budget runs out, but a continuous session has no such hook — on a large
   // codebase the model can spend its whole turn budget exploring and stop (or be
@@ -114,8 +121,22 @@ export async function runAuditSession(input: {
   // are exact. The findings finalize must NOT bypass the confirmation gate: it asks
   // only for the obligation analysis (discharged or suspected), never for a confirmed
   // status without a passing test.
+  const hasScratch = (basename: string): boolean =>
+    [...input.ctx.session.scratchFiles.keys()].some((key) => key === basename || key.endsWith(`/${basename}`));
   const finalizeIfEmpty = async (): Promise<void> => {
     if (finalizing) return;
+    if (input.confirm) {
+      if (hasScratch("confirm_decision.json")) return;
+      finalizing = true;
+      await input.logger.event("audit_confirm_finalize", { reason: "no confirm_decision.json before stop" });
+      try {
+        await session.prompt(CONFIRM_FINALIZE_PROMPT);
+      } catch {
+        // best-effort
+      }
+      await input.logger.event("audit_confirm_finalize_done", { hasDecision: hasScratch("confirm_decision.json") });
+      return;
+    }
     if (input.map) {
       if (readScratchScopes(input.ctx.session).length > 0) return;
       finalizing = true;
@@ -150,6 +171,7 @@ export async function runAuditSession(input: {
         ...(input.deepFocus ? { deepFocus: input.deepFocus } : {}),
         ...(input.map ? { map: true } : {}),
         ...(input.verify ? { verify: input.verify } : {}),
+        ...(input.confirm ? { confirm: input.confirm } : {}),
       }));
     } catch (error) {
       if (!budgetAborted) {
@@ -228,7 +250,10 @@ const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
   }),
 };
 
-function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; verify?: string }): string {
+function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; verify?: string; confirm?: string }): string {
+  // Confirm is the open-world mode: it has its own white-hat line (fork/read live
+  // networks OK, never broadcast), so it does NOT share the local-only scaffold below.
+  if (input.confirm) return buildConfirmSessionPrompt({ confirm: input.confirm, fileManifest: input.fileManifest, ...(input.scopeNote ? { scopeNote: input.scopeNote } : {}), ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   const intro = input.verify ? verifyIntro(input.verify) : input.map ? mapIntro() : input.deep ? deepIntro(input.deepFocus) : breadthIntro();
   return `${intro}
 
@@ -267,6 +292,31 @@ ${input.map
 const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering the most soundness-critical regions you saw (entrypoints that move value, accounting/share math, authorization, liquidation/swap invariants, oracle binding). Partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
 
 const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis you have already done, WRITE findings.json now at the workspace root as your very next action — call the write tool once with the obligations you enumerated for this region and EACH one's status: either discharged (state the exact enforcing line) or suspected (state root cause, exact location, attacker impact, and a fix). Do NOT mark anything confirmed/confirmed-executable — that status requires a test you actually ran and passed, and the budget is gone. Persisting your suspected/discharged analysis is the goal; partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
+
+const CONFIRM_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, fork, fetch, or run anything else. Based ONLY on what you have already reproduced, WRITE confirm_decision.json now at the workspace root as your very next action — call the write tool once with a JSON array, one row per DISTINCT bug: {"bug","members":[...],"distinct_fix","reproduced":"yes"|"no"|"could-not-set-up","repro_evidence","repro_command_id","fix_patch":{"path","old","new"},"patched_success_patterns":[...],"corroboration","novelty","human_gates","recommendation":"submit-candidate"|"needs-human"|"drop"}. Mark "reproduced":"yes" ONLY for a bug you actually reproduced on the real target with a passing command_id; otherwise "no"/"could-not-set-up" with the crutch/blocker named. Include repro_command_id + fix_patch + patched_success_patterns for any source-level PoC so the framework can verify consolidation by execution. Partial but honest beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
+
+// Confirm session prompt = the confirm mission/rules (shared with the loop driver's
+// system prompt) plus this run's frozen findings and context. It deliberately does
+// NOT reuse the local-only scaffold buildSessionPrompt builds for the other modes.
+function buildConfirmSessionPrompt(input: { confirm: string; fileManifest: string; scopeNote?: string; memoryHint?: string }): string {
+  return `${AUDIT_CONFIRM_SYSTEM}
+
+The prior audit's confirmed findings (frozen; reproduce/consolidate these — do NOT discover new ones):
+${input.confirm}
+
+The frozen audit report and per-finding disclosures are under corpus/ in your workspace — read them for each finding's claimed exploit and fix.
+
+Authorized scope note:
+${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() : "(none provided — treat all loaded source as in scope)"}
+
+Durable memory from prior runs of this target:
+${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim() : "(empty)"}
+
+Loaded source files:
+${input.fileManifest}
+
+Consolidate the findings into distinct bugs, reproduce each distinct bug against real ground truth, check novelty/corroboration online (leads only, never proof), then write confirm_decision.json and emit done.`;
+}
 
 function verifyIntro(claim: string): string {
   return `You are an autonomous white-hat security auditor in VERIFY mode: you are handed ONE specific suspected finding and must determine BY EXECUTION whether it is REAL or a FALSE POSITIVE. Do NOT enumerate new issues.

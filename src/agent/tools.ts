@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { AuditorConfig } from "../config.js";
-import { analyzeAgentBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "../security/policy.js";
+import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "../security/policy.js";
 import { prepareWorkspaceToolchain } from "./prepare.js";
 import {
   firstBlockedSandboxFile,
@@ -292,7 +292,11 @@ const bashTool: AgentTool = {
   async run(args, ctx) {
     const normalized = normalizeBashCommand(args, ctx.cfg);
     if ("error" in normalized) return { observation: normalized.error };
-    const blocked = analyzeAgentBashCommandSafety(normalized.command);
+    // CONFIRM mode swaps to the network-enabled policy (fork/read live networks, fetch,
+    // search — never broadcast); `fsa run` keeps the network-sealed local-only policy.
+    const blocked = ctx.cfg.confirmMode
+      ? analyzeConfirmBashCommandSafety(normalized.command)
+      : analyzeAgentBashCommandSafety(normalized.command);
     if (blocked.blocked) return { observation: `blocked: ${blocked.reason ?? "command blocked by policy"}` };
 
     const workspace = await ensureWorkspace(ctx);

@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { defaultConfig, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
 import { runAudit } from "./agent/audit.js";
+import { runConfirm } from "./agent/confirm.js";
 import { MockAuditLlmClient } from "./llm/mock.js";
 import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/history.js";
 
@@ -31,6 +32,24 @@ async function main(argv: string[]): Promise<void> {
       const { total, audited, pending } = result.scopeCoverage;
       console.log(`[scopes] audited ${audited}/${total}` + (pending > 0 ? `, ${pending} pending — run the same command again to audit the next batch (or --remap to re-enumerate).` : " — inventory fully audited."));
     }
+    return;
+  }
+
+  if (cmd === "confirm") {
+    // Open-world confirmation pass over a prior `fsa run`: freeze its findings, then
+    // reproduce/consolidate them against real-world ground truth (network enabled) and
+    // emit a submit/no-submit decision sheet. Usage: fsa confirm <run-dir> --source <paths...>
+    const { cfg } = await parseConfig(rest);
+    const positional = rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined;
+    const inputRunDir = positional ?? readFlag(rest, "--run") ?? readFlag(rest, "--input");
+    if (!inputRunDir) throw new Error("fsa confirm needs a prior run directory: fsa confirm <run-dir> --source <paths...>");
+    if (cfg.sourcePaths.length === 0) throw new Error("--source <paths...> is required (the target code to reproduce against)");
+    // Confirm is UNBOUNDED by default (run until the model finishes); --max-steps caps it only if given.
+    const maxSteps = readIntFlag(rest, "--max-steps");
+    const result = await runConfirm(cfg, { inputRunDir, ...(maxSteps !== undefined ? { maxSteps } : {}), streamEvents: true });
+    console.log(`[confirm dir] ${result.runDir}`);
+    console.log(`[report] ${result.runDir}/confirm_report.md  ← decision sheet (distinct bugs, reproduced?, novelty, recommendation)`);
+    console.log(`[provenance] ${result.runDir}/confirm_provenance.json  ← fingerprints of the findings frozen before any network access`);
     return;
   }
 
@@ -217,7 +236,15 @@ function printHelp(): void {
 
 Usage:
   fsa run --target <name> --source <paths...> [--corpus <paths...>] [--max-steps <n>]
+  fsa confirm <run-dir> --source <paths...> [--target <name>] [--max-steps <n>]   (unbounded by default; --max-steps caps it)
   fsa history import-run --target <name> --run <dir> [--history-dir <dir>]
+
+run is the network-SEALED discovery pass: the model finds + proves bugs blind, with no
+network access (provably no online lookup). confirm is the open-world counterpart: it
+freezes a prior run's findings, then — WITH the network — reproduces each against real
+ground truth (e.g. a mainnet fork), consolidates duplicates into distinct bugs, checks
+novelty/corroboration online (leads, never proof), and emits a submit/no-submit decision
+sheet. Found blind, then confirmed open.
 
 audit is the thin agentic mode: the model drives its own investigation with
 pi-style read/write/edit/bash tools and durable cross-run memory. The framework

@@ -2,7 +2,7 @@ import type { AuditorConfig } from "../config.js";
 import type { LlmClient } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
 import { extractJsonArray, extractJsonObject } from "../util/json.js";
-import { buildDeepKickoff, buildAuditKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_SYSTEM, renderTranscript, type TranscriptStep } from "./prompts.js";
+import { buildConfirmKickoff, buildDeepKickoff, buildAuditKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_SYSTEM, renderTranscript, type TranscriptStep } from "./prompts.js";
 import type { AgentTool, ToolContext } from "./tools.js";
 
 // Provider-agnostic ReAct driver. It runs on top of the plain text-in/text-out
@@ -33,11 +33,13 @@ export async function runAuditLoop(input: {
   map?: boolean;
   /** Verify posture: confirm-or-refute ONE specific suspected finding (the claim text). */
   verify?: string;
+  /** Confirm mode: open-world reproduce/consolidate/decide over a prior run's findings (the seed text). */
+  confirm?: string;
   /** Base backoff for transient-throttle retries; overridable for tests. */
   transientRetryBaseMs?: number;
 }): Promise<AuditLoopResult> {
   const transientRetryBaseMs = input.transientRetryBaseMs ?? 4000;
-  const systemPrompt = input.verify ? AUDIT_VERIFY_SYSTEM : input.map ? MAP_SYSTEM : input.deep ? AUDIT_DEEP_SYSTEM : AUDIT_SYSTEM;
+  const systemPrompt = input.confirm ? AUDIT_CONFIRM_SYSTEM : input.verify ? AUDIT_VERIFY_SYSTEM : input.map ? MAP_SYSTEM : input.deep ? AUDIT_DEEP_SYSTEM : AUDIT_SYSTEM;
   const toolsByName = new Map(input.tools.map((tool) => [tool.name, tool]));
   const kickoffCommon = {
     target: input.cfg.targetName,
@@ -47,13 +49,15 @@ export async function runAuditLoop(input: {
     ...(input.scopeNote ? { scopeNote: input.scopeNote } : {}),
     ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}),
   };
-  const kickoff = input.verify
-    ? buildVerifyKickoff({ ...kickoffCommon, verify: input.verify })
-    : input.map
-      ? buildMapKickoff(kickoffCommon)
-      : input.deep
-        ? buildDeepKickoff({ ...kickoffCommon, ...(input.deepFocus ? { deepFocus: input.deepFocus } : {}) })
-        : buildAuditKickoff(kickoffCommon);
+  const kickoff = input.confirm
+    ? buildConfirmKickoff({ ...kickoffCommon, confirm: input.confirm })
+    : input.verify
+      ? buildVerifyKickoff({ ...kickoffCommon, verify: input.verify })
+      : input.map
+        ? buildMapKickoff(kickoffCommon)
+        : input.deep
+          ? buildDeepKickoff({ ...kickoffCommon, ...(input.deepFocus ? { deepFocus: input.deepFocus } : {}) })
+          : buildAuditKickoff(kickoffCommon);
   const steps: TranscriptStep[] = [];
   let consecutiveParseErrors = 0;
 
@@ -65,7 +69,7 @@ export async function runAuditLoop(input: {
   // residual hypothesis into findings.json. Skips when the model is unresponsive
   // (e.g. provider quota), where another call would also fail.
   const finalizeFindings = async (): Promise<void> => {
-    if (input.map) return; // map writes scopes.json, not findings.json
+    if (input.map || input.confirm) return; // map writes scopes.json; confirm writes confirm_decision.json
     if (input.ctx.session.scratchFiles.has("findings.json")) return;
     const ask = `Your audit is ending now. Output ONLY a JSON array for findings.json and nothing else (no prose, no fences): every confirmed finding AND every residual hypothesis you formed, each as {"title","severity","location","description","evidence","exploit_sketch","fix","confidence","command_id"?}. Include lower-confidence hypotheses with their location and why they are suspected. If you genuinely found nothing, output [].`;
     try {

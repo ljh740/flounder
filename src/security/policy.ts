@@ -113,6 +113,73 @@ export function isAgentBuildCommand(command: StructuredReproductionCommand): boo
   return isAllowedBuildCommand(command.program.trim(), command.args.map((arg) => String(arg)));
 }
 
+/**
+ * Verbs that PUSH a transaction/block to a network (as opposed to reading/forking
+ * it). The confirm-mode white-hat line is "fork and READ live networks freely, but
+ * never BROADCAST to one" — so these are blocked only when their target is non-local
+ * (replaying the exploit against a LOCAL fork is exactly what reproduction needs).
+ * A small, domain-free safety denylist, not a per-ecosystem recipe.
+ */
+export const CONFIRM_BROADCAST_PATTERNS: RegExp[] = [
+  /\bcast\s+send\b/i,
+  /--broadcast\b/i,
+  /\bsend-?raw-?transaction\b/i,
+  /\beth_send(?:raw)?transaction\b/i,
+  /\bsendtransaction\b/i,
+  /\bsubmit(?:raw)?(?:transaction|tx|block)\b/i,
+  /\bpublish(?:raw)?(?:transaction|tx|block)\b/i,
+  /\bbroadcast(?:tx|transaction)?\b/i,
+];
+
+/**
+ * CONFIRM-mode bash policy: the open-world counterpart to analyzeAgentBashCommandSafety.
+ * It KEEPS the structural guards (plain program name, simple argv, workspace-contained
+ * paths) and the white-hat line, but DROPS the local-only network enforcement and the
+ * test/build/inspect allowlist — confirm must reach the network (fork the live chain,
+ * stand up a real node, fetch/search) and the model picks the tools for whatever target
+ * it faces. The one network rule kept: never broadcast a transaction to a NON-LOCAL
+ * network (reading/forking live state, and broadcasting to a LOCAL fork, are both fine).
+ */
+export function analyzeConfirmBashCommandSafety(command: StructuredReproductionCommand): CommandSafetyDecision {
+  const program = command.program.trim();
+  const args = command.args.map((arg) => String(arg));
+  if (program.length === 0 || program.includes("/") || program.includes("\\") || /[\s;&|`$<>]/.test(program)) {
+    return { blocked: true, reason: "Blocked by full-stack-auditor guardrail: confirm commands must use a plain program name (no shell operators)." };
+  }
+  if (args.some((arg) => /[\0\r\n]/.test(arg))) {
+    return { blocked: true, reason: "Blocked by full-stack-auditor guardrail: confirm command arguments must be simple argv entries." };
+  }
+  const workspaceDecision = analyzeWorkspacePathSafety(args);
+  if (workspaceDecision.blocked) return workspaceDecision;
+  const rendered = [program, ...args].join(" ");
+  const broadcast = findMatch(rendered, CONFIRM_BROADCAST_PATTERNS);
+  if (broadcast && targetsNonLocalNetwork(args)) {
+    return {
+      blocked: true,
+      reason:
+        "Blocked by full-stack-auditor white-hat guardrail: confirm may FORK and READ a live network, but must never BROADCAST a transaction to one. Replay the exploit against a LOCAL fork (anvil/local RPC), not the live network.",
+      matchedAction: broadcast,
+    };
+  }
+  return { blocked: false };
+}
+
+/** True if any rpc/network flag points off-localhost, or a remote URL / RPC-secret reference appears in argv. */
+function targetsNonLocalNetwork(args: string[]): boolean {
+  for (let idx = 0; idx < args.length; idx += 1) {
+    const arg = args[idx] ?? "";
+    const lower = arg.toLowerCase();
+    const valueFromEquals = valueAfterEquals(arg);
+    if (isRpcFlag(lower) || isNetworkFlag(lower)) {
+      const value = valueFromEquals ?? args[idx + 1];
+      if (value && !isLocalNetworkValue(value)) return true;
+    }
+    if (looksLikeRemoteUrl(arg) && !isLocalUrl(arg)) return true;
+    if (looksLikeRpcEnvReference(arg)) return true;
+  }
+  return false;
+}
+
 function analyzeStructuredCommandBaseSafety(command: StructuredReproductionCommand): CommandSafetyDecision {
   const program = command.program.trim();
   const args = command.args.map((arg) => String(arg));

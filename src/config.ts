@@ -57,6 +57,11 @@ export interface AuditorConfig {
   // enumeration; reuses the confirmation gate. The confirmation step the dig
   // produces on its own, runnable standalone against an existing suspected finding.
   auditVerify?: string;
+  // CONFIRM mode (`fsa confirm`): the open-world counterpart to the network-sealed
+  // `fsa run`. When set, the bash tool swaps to the network-enabled policy (fork/read
+  // live networks, fetch, search — never BROADCAST). This is the only capability
+  // difference; the white-hat broadcast line and the confirmation gate are unchanged.
+  confirmMode: boolean;
   // Per-role model assignment. A role (map/dig/refute) resolves to its own entry,
   // else `default`, else the top-level provider/auditModel/thinkingLevel. Nothing
   // is auto-downgraded: an unspecified role inherits the main model.
@@ -139,6 +144,7 @@ export function defaultConfig(): AuditorConfig {
     auditDigSamples: 1,
     auditDigConcurrency: 1,
     auditRemap: false,
+    confirmMode: false,
     dryRun: false,
   };
 }

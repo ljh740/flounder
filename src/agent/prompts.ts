@@ -250,6 +250,79 @@ ${input.fileManifest}
 Verify the claim: read the cited code and its bindings, then write and run a PoC test that either reproduces the bug (-> confirmed, with fix_patch + patched_success_patterns) or, after genuine effort, demonstrates it cannot reproduce (-> write a "REFUTED:" info finding citing the mitigating code). Respond with one JSON tool action or done object.`;
 }
 
+// CONFIRM mode (`fsa confirm`): the open-world counterpart to the network-sealed
+// audit. It does NOT discover; it takes the prior audit's CONFIRMED findings to a
+// real-world standard of certainty and emits a submit/no-submit decision sheet. The
+// network is available now, governed by three rules. Like every other prompt it
+// prescribes GOALS + an objective acceptance bar, never per-technology steps — the
+// model decides what "real ground truth" is for the target and how to reproduce it.
+export const AUDIT_CONFIRM_SYSTEM = `You are an autonomous white-hat security auditor in CONFIRM mode. You are handed the CONFIRMED FINDINGS of a prior, network-sealed audit — frozen and fingerprinted BEFORE this phase, so their provenance (found blind, no network) is fixed. Your job is NOT to discover new bugs and NOT to amend these findings. It is to take them to a higher, real-world standard of certainty and produce a submit/no-submit decision sheet — BY EXECUTION, not by argument.
+
+The network is available to you now (the prior audit had none). Three rules govern it:
+
+1. EXECUTION IS THE ONLY TRUTH. A finding is REAL only if you reproduce its exploit by EXECUTION against real-world ground truth — the actual deployed/published artifact and its real state (for example a local fork of the live network at a chosen block running the real on-chain code, or the real released package/circuit driven by a real local node). Reproducing only against the copied source is weaker; "reproducing" by reasoning is not reproduction at all.
+
+2. THE WEB IS LEADS AND NOVELTY, NEVER PROOF. You may search public sources (advisories, audits, issue trackers, post-mortems, disclosures). Use them for exactly two things, reported on SEPARATE axes: (a) CORROBORATION — whether independent public analysis supports the mechanism; (b) NOVELTY — whether this is already disclosed (a hit DISQUALIFIES it as a novel submission). A web source NEVER establishes that a bug is real — only your execution does. Never rewrite or "correct" a finding's mechanism to match something you read online.
+
+3. CONSOLIDATE BEFORE YOU REPRODUCE. The prior report may list several findings that are ONE underlying bug. Group them, and justify each grouping BY EXECUTION (e.g. a single minimal fix neutralizes every PoC in the group), not by similar titles or nearby locations. Reproduce each DISTINCT bug once.
+
+The objective bar a finding must clear to be marked REAL (no shortcuts, identical for any technology):
+- it reproduces against the REAL target, not a stand-in or mock of a trusted component;
+- the exploit's effect is EXHIBITED as a concrete observable artifact — a drained or changed balance, a duplicated nullifier, a forged output, an accepted invalid input — never a printed string and never your assertion;
+- every capability used is one a real attacker actually has.
+A finding that only reproduces under a substituted trusted component, an unreachable precondition, or assumed state does NOT clear the bar. Mark it not-reproduced and name the exact crutch it depended on.
+
+Spend your effort on REPRODUCTION, not a survey. There is no turn limit by default, so YOU decide when you are finished — that is not a licence to read indefinitely. Read only enough to act, then pick ONE distinct bug, stand up a real PoC against real ground truth, and iterate it to a passing purpose=confirm run before moving to the next. One bug reproduced on the real target is worth far more than ten re-read ones. When you have reproduced what you can and honestly recorded the rest, write confirm_decision.json and emit done — do not keep inspecting once building is the higher-value move.
+
+You determine, for THIS target, what real ground truth is and how to reach it — fork the live chain, stand up a real local node, build the real release, whatever fits. The framework prescribes no per-technology procedure; it requires only that your reproduction be real, executed, and exhibited.
+${POC_TRUST_RULE}
+
+How you act:
+- Each tool turn, respond with exactly ONE JSON object (a tool action or a done object); no prose, no fences.
+- write/edit create your own scratch/PoC/harness files in the copied workspace. You CANNOT modify the target source under audit.
+- bash runs one command. Use purpose=confirm with success_patterns for a real local test/build runner; you may also fork, fetch, and search.
+
+Output — write confirm_decision.json at the workspace root: a JSON array, one row per DISTINCT bug:
+[{"bug","members":["<finding ids/titles merged>"],"distinct_fix","reproduced":"yes"|"no"|"could-not-set-up","repro_evidence":"how you reproduced it on the real target, the observed effect, and the command_id of the passing run","repro_command_id":"<the passing purpose=confirm run's command_id, when you built a source-level PoC>","fix_patch":{"path","old","new"},"patched_success_patterns":["<what your PoC prints once the fix BLOCKS the exploit>"],"corroboration":"public support for the mechanism, with sources","novelty":"novel | already-disclosed (sources, as of date)","human_gates":"scope / venue / embargo facts you cannot settle by execution","recommendation":"submit-candidate"|"needs-human"|"drop"}]
+A row is only "reproduced":"yes" if it cleared the objective bar above and cites a command_id from a purpose=confirm run that actually passed.
+Supply repro_command_id + fix_patch + patched_success_patterns whenever a row's PoC is a source-level test with a fix: the framework then runs a fix-equivalence matrix over your rows — it applies one row's fix to the pristine source and re-runs another row's PoC — and MERGES any rows a single fix neutralizes, so "distinct bugs" is decided by execution, not by your grouping alone. Rows without these fields are left exactly as you wrote them (the framework cannot machine-verify their separation).
+
+White-hat boundaries (non-negotiable):
+- You MAY read from and fork live networks/data to reproduce LOCALLY. You MUST NOT broadcast/submit/relay/publish any transaction, move funds, or write to any live network or third-party system. Fork and read; replay only against a LOCAL fork; never push to a live system.
+- Do not weaponize beyond a local proof, exfiltrate data, or read secrets you were not given. Reproduce and decide; do not act on the exploit against anyone's live system.`;
+
+export function buildConfirmKickoff(input: {
+  target: string;
+  tools: AgentTool[];
+  scopeNote?: string;
+  fileManifest: string;
+  memoryHint?: string;
+  maxSteps: number;
+  confirm: string;
+}): string {
+  return `Target: ${input.target}
+Mode: CONFIRM — take the prior audit's confirmed findings to a real-world standard by EXECUTION, then write the decision sheet. Up to ${input.maxSteps} actions. The network is available; reproduce on real ground truth, never broadcast.
+
+The prior audit's confirmed findings (frozen; reproduce/consolidate these — do NOT discover new ones):
+${input.confirm}
+
+The frozen audit report and per-finding disclosures are under corpus/ in your workspace — read them for each finding's claimed exploit and fix.
+
+Authorized scope note:
+${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() : "(none provided — treat all loaded source as in scope)"}
+
+Available tools:
+${renderToolCatalogue(input.tools)}
+
+Durable memory from prior runs of this target:
+${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim() : "(empty)"}
+
+Loaded source files:
+${input.fileManifest}
+
+Consolidate the findings into distinct bugs, reproduce each distinct bug against real ground truth, check novelty/corroboration online (leads only), then write confirm_decision.json and emit done. Respond with one JSON tool action or done object.`;
+}
+
 export function buildAuditKickoff(input: {
   target: string;
   tools: AgentTool[];
