@@ -274,6 +274,7 @@ export class MetadataStore {
       "ALTER TABLE daemon ADD COLUMN workspace TEXT",
       "ALTER TABLE run ADD COLUMN run_scopes_target INTEGER",
       "ALTER TABLE run ADD COLUMN run_scopes_done INTEGER",
+      "ALTER TABLE finding ADD COLUMN tracking_status TEXT", // submission tracking: open|triaging|submitted|accepted|fixed|duplicate|rejected
     ]) {
       try {
         this.db.exec(alter);
@@ -555,6 +556,39 @@ export class MetadataStore {
 
   listFindings(projectId: number): Array<Record<string, unknown>> {
     return this.db.prepare("SELECT * FROM finding WHERE project_id = ? ORDER BY updated_at DESC").all(projectId) as Array<Record<string, unknown>>;
+  }
+
+  // --- global (cross-project) bug view -------------------------------------
+
+  /** Findings across ALL projects (joined with the project name), newest first, optionally
+   * filtered by status and/or tracking state. The "Bugs" dashboard's table. */
+  listGlobalFindings(opts: { status?: string | undefined; tracking?: string | undefined; limit?: number | undefined; offset?: number | undefined } = {}): Array<Record<string, unknown>> {
+    const cond: string[] = [], params: Array<string | number> = [];
+    if (opts.status) { cond.push("f.status = ?"); params.push(opts.status); }
+    if (opts.tracking) { cond.push("COALESCE(f.tracking_status, 'open') = ?"); params.push(opts.tracking); }
+    const where = cond.length ? "WHERE " + cond.join(" AND ") : "";
+    const limit = Math.max(1, Math.floor(opts.limit ?? 200));
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    return this.db
+      .prepare("SELECT f.*, p.name AS project_name FROM finding f JOIN project p ON p.id = f.project_id " + where + " ORDER BY f.updated_at DESC LIMIT ? OFFSET ?")
+      .all(...params, limit, offset) as Array<Record<string, unknown>>;
+  }
+
+  /** Aggregate counts for the Bugs dashboard: total findings, a breakdown by status, and a
+   * breakdown by tracking state (untracked findings count as 'open'). */
+  globalFindingStats(): { total: number; byStatus: Record<string, number>; byTracking: Record<string, number> } {
+    const byStatus: Record<string, number> = {};
+    for (const r of this.db.prepare("SELECT status, COUNT(*) AS n FROM finding GROUP BY status").all() as Array<{ status: string; n: number }>) byStatus[r.status] = Number(r.n);
+    const byTracking: Record<string, number> = {};
+    for (const r of this.db.prepare("SELECT COALESCE(tracking_status, 'open') AS t, COUNT(*) AS n FROM finding GROUP BY t").all() as Array<{ t: string; n: number }>) byTracking[r.t] = Number(r.n);
+    const total = Number((this.db.prepare("SELECT COUNT(*) AS n FROM finding").get() as { n: number }).n);
+    return { total, byStatus, byTracking };
+  }
+
+  /** Update a finding's submission-tracking state (does NOT touch updated_at, so the audit
+   * "found" time and newest-first ordering are preserved). */
+  setFindingTracking(id: number, status: string): boolean {
+    return this.db.prepare("UPDATE finding SET tracking_status = ? WHERE id = ?").run(status || null, id).changes > 0;
   }
 
   /** Finding counts per status — one GROUP BY, for the dashboard + filter chips. */

@@ -274,6 +274,25 @@ const ROUTES: Route[] = [
   }),
 
   route({
+    method: "GET", path: "/api/bugs",
+    summary: "Every finding across ALL projects (joined with project name) plus aggregate stats — the cross-project Bugs dashboard. Optional ?status= and ?tracking= filters; ?limit/&offset paginate.",
+    handler: (c) => {
+      const status = c.url.searchParams.get("status") || undefined;
+      const tracking = c.url.searchParams.get("tracking") || undefined;
+      const limit = Number(c.url.searchParams.get("limit")) || undefined;
+      const offset = Number(c.url.searchParams.get("offset")) || undefined;
+      sendJson(c.res, 200, { findings: c.store.listGlobalFindings({ status, tracking, limit, offset }), stats: c.store.globalFindingStats() });
+    },
+  }),
+  route({
+    method: "PATCH", path: "/api/findings/:id/tracking",
+    summary: "Set a finding's submission-tracking state (open|triaging|submitted|accepted|fixed|duplicate|rejected) — for following a bug from discovery to vendor disclosure.",
+    params: { id: "finding id" },
+    body: { status: "open|triaging|submitted|accepted|fixed|duplicate|rejected" },
+    handler: findingTracking,
+  }),
+
+  route({
     method: "POST", path: "/api/launch",
     summary: "Queue an ad-hoc run from a full launch spec (absolute materials, no project staging) — the entry point the CLI drives. Upserts a project row keyed by `target` so the run is grouped + visible, enqueues the job, and nudges daemons. Use POST /api/projects/:name/runs instead to launch a UI-configured project.",
     body: {
@@ -663,6 +682,15 @@ async function daemonRename(c: Ctx): Promise<void> {
   if (!name) return sendJson(c.res, 400, { error: "name is required" });
   const ok = c.store.renameDaemon(Number(c.params.id), name);
   ok ? sendJson(c.res, 200, { ok: true }) : sendJson(c.res, 404, { error: "no such daemon" });
+}
+
+const TRACKING_STATES = new Set(["open", "triaging", "submitted", "accepted", "fixed", "duplicate", "rejected"]);
+async function findingTracking(c: Ctx): Promise<void> {
+  const body = (await readBody(c.req)) as Record<string, unknown>;
+  const status = typeof body.status === "string" ? body.status : "";
+  if (!TRACKING_STATES.has(status)) return sendJson(c.res, 400, { error: "invalid tracking status", allowed: [...TRACKING_STATES] });
+  const ok = c.store.setFindingTracking(Number(c.params.id), status);
+  ok ? sendJson(c.res, 200, { ok: true }) : sendJson(c.res, 404, { error: "no such finding" });
 }
 
 // Serve a run's report artifact (text) from its run dir. Allowlisted filenames only (no slashes,

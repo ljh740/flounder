@@ -57,7 +57,14 @@
   .counter { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 2px 10px; border-radius: 2em; border: 1px solid rgba(255,255,255,.2); color: #9da7b1; }
   .counter.live { color: #3fb950; border-color: rgba(63,185,80,.5); }
 
+  .topnav { display: flex; gap: 4px; margin-left: 14px; }
+  .topnav-btn { background: transparent; border: 0; color: var(--fg-muted); cursor: pointer; font: 600 13px/1 var(--sans); padding: 7px 12px; border-radius: 7px; }
+  .topnav-btn:hover { background: var(--canvas-subtle); color: var(--fg); }
+  .topnav-btn.sel { background: var(--sel-bg); color: var(--accent); }
   main { display: grid; grid-template-columns: 360px 1fr; height: calc(100vh - 57px); }
+  main[hidden], #bugsView[hidden] { display: none; } /* element/id selectors beat the [hidden] UA rule, so restate it */
+  #bugsView { height: calc(100vh - 57px); overflow-y: auto; padding: 32px 36px; background: var(--canvas-subtle); }
+  #bugsView .card { max-width: 1100px; }
   #list { overflow-y: auto; border-right: 1px solid var(--border); padding: 18px; background: var(--canvas); }
   #detail { overflow-y: auto; padding: 32px 36px; background: var(--canvas-subtle); }
   /* multica-style: a calm gray page with white cards. Major detail sections sit in .card. */
@@ -122,6 +129,7 @@
   .progress > .audited { background: var(--success-emphasis); }
   .progress > .pending { background: var(--neutral-emphasis); opacity: .4; }
   .progress > .deferred { background: var(--attention-fg); opacity: .55; }
+  .track-sel { font-size: 11px; padding: 3px 6px; border-radius: 6px; }
   .rowbtn { cursor: pointer; background: transparent; border: 1px solid var(--border); color: var(--fg-muted); border-radius: 6px; padding: 2px 9px; font: 500 11px/1.5 var(--sans); }
   .rowbtn:hover { border-color: var(--fg-subtle); color: var(--fg); }
   .rowbtn.danger:hover { border-color: var(--danger-fg); color: var(--danger-fg); }
@@ -235,6 +243,7 @@
   <span style="display:flex"><img src="data:image/png;base64,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" alt="Flounder" height="24" style="display:block" /></span>
   <h1>Flounder</h1>
   <span class="sub">audit tracker</span>
+  <nav class="topnav"><button class="topnav-btn sel" id="navProjects">Projects</button><button class="topnav-btn" id="navBugs">Bugs</button></nav>
   <span class="spacer"></span>
   <span id="livePill" class="counter">connecting…</span>
   <button class="icon-btn" id="settingsBtn" title="Settings"></button>
@@ -252,6 +261,17 @@
   </div>
   <div id="detail"><div class="empty">Select a project, or create one with “New project”.</div></div>
 </main>
+
+<section id="bugsView" hidden>
+  <div class="card">
+    <div class="d-head"><h2>Bugs across all projects</h2><span class="muted" id="bugsTotal"></span></div>
+    <div class="muted" style="margin-top:4px;font-size:12px">Every finding from every project, with submission tracking — from discovery through vendor disclosure.</div>
+    <div class="stats" id="bugsStats"></div>
+    <div style="margin-top:10px"><span class="muted" style="font-size:11px;margin-right:6px">status</span><span class="chips" id="bugsStatusChips"></span></div>
+    <div style="margin-top:8px"><span class="muted" style="font-size:11px;margin-right:6px">tracking</span><span class="chips" id="bugsTrackChips"></span></div>
+  </div>
+  <div class="card"><div id="bugsTable"></div></div>
+</section>
 
 <dialog id="projDialog"><form method="dialog" id="projForm">
   <div class="dlg-head">Create project</div>
@@ -342,7 +362,7 @@
 
 <script>
 const $ = (sel) => document.querySelector(sel);
-let state = { projects: [], active: [], providers: [], filter: "", selected: null, detail: null, phase: null, scopePage: 0, f: { status: "", q: "", limit: 20, offset: 0, rows: [], total: 0 } };
+let state = { projects: [], active: [], providers: [], filter: "", selected: null, detail: null, phase: null, scopePage: 0, view: "projects", bugs: { status: "", tracking: "" }, f: { status: "", q: "", limit: 20, offset: 0, rows: [], total: 0 } };
 
 // Live activity feed: streams a run's events.jsonl (model thinking/output + tool calls) over
 // SSE. Kept in a PERSISTENT detached node so the detail re-rendering each tick doesn't wipe
@@ -1064,6 +1084,56 @@ $("#daemonNewBtn").onclick = async () => {
 // "Manage…" links from the project + config dialogs jump to the Providers settings
 $("#projManageProv").onclick = () => { projDialog.close(); openSettings("providers"); };
 $("#cfgManageProv").onclick = () => { cfgDialog.close(); openSettings("providers"); };
+
+// --- global Bugs view (cross-project): every finding + submission tracking ---
+const TRACKING = ["open", "triaging", "submitted", "accepted", "fixed", "duplicate", "rejected"];
+function setView(v) {
+  state.view = v;
+  $("#navProjects").classList.toggle("sel", v === "projects");
+  $("#navBugs").classList.toggle("sel", v === "bugs");
+  $("main").hidden = v !== "projects";
+  $("#bugsView").hidden = v !== "bugs";
+  if (v === "bugs") renderBugs();
+}
+$("#navProjects").onclick = () => setView("projects");
+$("#navBugs").onclick = () => setView("bugs");
+
+async function renderBugs() {
+  const qs = new URLSearchParams();
+  if (state.bugs.status) qs.set("status", state.bugs.status);
+  if (state.bugs.tracking) qs.set("tracking", state.bugs.tracking);
+  let data = { findings: [], stats: { total: 0, byStatus: {}, byTracking: {} } };
+  try { data = await (await fetch("/api/bugs?" + qs)).json(); } catch {}
+  const st = data.stats || { total: 0, byStatus: {}, byTracking: {} };
+  const confirmed = (st.byStatus["confirmed-differential"] || 0) + (st.byStatus["confirmed-executable"] || 0) + (st.byStatus["confirmed-source"] || 0);
+  $("#bugsTotal").textContent = st.total + " findings · " + confirmed + " confirmed";
+  $("#bugsStats").innerHTML =
+    '<div class="stat"><div class="n">' + st.total + '</div><div class="k">total findings</div></div>'
+    + '<div class="stat"><div class="n" style="color:var(--success-fg)">' + confirmed + '</div><div class="k">confirmed bugs</div></div>'
+    + '<div class="stat"><div class="n">' + (st.byTracking.submitted || 0) + '</div><div class="k">submitted</div></div>'
+    + '<div class="stat"><div class="n" style="color:var(--success-fg)">' + (st.byTracking.accepted || 0) + '</div><div class="k">accepted</div></div>';
+  const schip = (label, val, key) => '<span class="chip ' + (state.bugs[key === "status" ? "status" : "tracking"] === val ? "on" : "") + '" data-b' + key + '="' + val + '">' + label + '</span>';
+  let sc = schip("All", "", "status");
+  for (const s of STATUSES) if (st.byStatus[s]) sc += schip(s + " " + st.byStatus[s], s, "status");
+  $("#bugsStatusChips").innerHTML = sc;
+  let tc = schip("All", "", "track");
+  for (const t of TRACKING) if (st.byTracking[t]) tc += schip(t + " " + st.byTracking[t], t, "track");
+  $("#bugsTrackChips").innerHTML = tc;
+  $("#bugsStatusChips").querySelectorAll("[data-bstatus]").forEach((c) => c.onclick = () => { state.bugs.status = c.dataset.bstatus; renderBugs(); });
+  $("#bugsTrackChips").querySelectorAll("[data-btrack]").forEach((c) => c.onclick = () => { state.bugs.tracking = c.dataset.btrack; renderBugs(); });
+  const finds = data.findings || [];
+  if (!finds.length) { $("#bugsTable").innerHTML = '<div class="muted">No findings match these filters yet.</div>'; return; }
+  const trackSel = (f) => { const cur = f.tracking_status || "open"; return '<select class="track-sel" data-track="' + f.id + '">' + TRACKING.map((t) => "<option" + (t === cur ? " selected" : "") + ">" + t + "</option>").join("") + "</select>"; };
+  const reportBtn = (f) => { if (!f.run_id) return ""; const name = (f.report_path || "").split("/").pop(); const rn = /^report_f\d+\.md$/.test(name) ? name : "audit_report.md"; return '<button class="rowbtn" data-report="' + f.run_id + '" data-rname="' + rn + '" data-rtitle="' + esc(f.title || "report") + '">report</button>'; };
+  const rows = finds.map((f) => '<tr><td><a href="#" data-goproj="' + esc(f.project_name) + '">' + esc(f.project_name) + '</a></td><td>' + statusBadge(f.status) + '</td><td>' + esc(f.title || "") + '</td><td class="mono muted">' + esc(f.location || "") + '</td><td class="muted" style="font-size:11px">' + fmtTime(f.updated_at || f.created_at) + '</td><td>' + trackSel(f) + '</td><td style="white-space:nowrap">' + reportBtn(f) + "</td></tr>").join("");
+  $("#bugsTable").innerHTML = '<table class="fixed"><colgroup><col style="width:118px"><col style="width:148px"><col style="width:25%"><col style="width:25%"><col style="width:80px"><col style="width:104px"><col style="width:84px"></colgroup><thead><tr><th>project</th><th>status</th><th>title</th><th>location</th><th>found</th><th>tracking</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>";
+  $("#bugsTable").querySelectorAll("[data-track]").forEach((sel) => sel.onchange = async () => {
+    await fetch("/api/findings/" + sel.dataset.track + "/tracking", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: sel.value }) });
+    renderBugs();
+  });
+  $("#bugsTable").querySelectorAll("[data-report]").forEach((b) => b.onclick = () => openReport(b.dataset.report, b.dataset.rname, b.dataset.rtitle));
+  $("#bugsTable").querySelectorAll("[data-goproj]").forEach((a) => a.onclick = (e) => { e.preventDefault(); setView("projects"); selectProject(a.dataset.goproj); });
+}
 
 // --- live stream ---
 function connect() {
