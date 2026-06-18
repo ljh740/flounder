@@ -143,6 +143,17 @@
   .act-step b { color: var(--fg); }
   .act-ms { font-size: 12px; color: var(--success-fg); font-family: var(--mono); }
   .act-err { font-family: var(--mono); font-size: 12px; color: var(--danger-fg); }
+  /* GitHub Actions-style collapsible step groups */
+  .actgrp { border-bottom: 1px solid var(--border-muted); }
+  .actgrp:last-child { border-bottom: 0; }
+  .actgrp > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 8px 14px; }
+  .actgrp > summary::-webkit-details-marker { display: none; }
+  .actgrp > summary::before { content: "▸"; color: var(--fg-subtle); font-size: 10px; flex: none; }
+  .actgrp[open] > summary::before { content: "▾"; }
+  .actgrp > summary:hover { background: var(--canvas-subtle); }
+  .act-time { margin-left: auto; color: var(--fg-subtle); font-size: 11px; font-family: var(--mono); }
+  .actbody { padding: 2px 14px 10px 30px; }
+  .actbody .act { padding: 4px 0; border-bottom: 0; }
 
   .d-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .d-head h2 { font-size: 24px; font-weight: 500; margin: 0; letter-spacing: -0.01em; }
@@ -326,6 +337,7 @@ activityEl.className = "activity";
 let activityPrevTop = 0, activityWasBottom = true, savedScopesTop = 0;
 let logES = null, logRunId = null;
 let curBlockEl = null, curBlockKind = null; // the in-progress thinking/output block for token deltas
+let curGroupBody = null; // the body of the current collapsible step group (GitHub Actions-style log)
 
 function attachActivity(d) {
   const slot = document.getElementById("activitySlot");
@@ -336,37 +348,52 @@ function attachActivity(d) {
   if (rid === logRunId) return; // already streaming this run — keep the feed + connection
   if (logES) { logES.close(); logES = null; }
   activityEl.innerHTML = "";
-  curBlockEl = null; curBlockKind = null;
+  curBlockEl = null; curBlockKind = null; curGroupBody = null;
   logRunId = rid;
   if (rid == null) return;
   logES = new EventSource("/api/runs/" + rid + "/log");
   logES.onmessage = (ev) => { try { appendActivity(JSON.parse(ev.data)); } catch {} };
 }
 
+// GitHub Actions-style log: each tool call (step) is a collapsible group; the model's
+// thinking/output for that step streams into its body. The latest group stays open; the
+// previous one collapses (like Actions keeping only the running step expanded).
+function startActGroup(summaryHtml) {
+  const prev = activityEl.lastElementChild;
+  if (prev && prev.tagName === "DETAILS") prev.open = false;
+  activityEl.insertAdjacentHTML("beforeend", '<details class="actgrp" open><summary>' + summaryHtml + '</summary><div class="actbody"></div></details>');
+  curGroupBody = activityEl.lastElementChild.querySelector(".actbody");
+  curBlockEl = null; curBlockKind = null;
+  return curGroupBody;
+}
+function ensureGroup() { return curGroupBody || startActGroup('<span class="act-step">working…</span>'); }
+const nowTime = () => new Date().toLocaleTimeString([], { hour12: false });
+
 function appendActivity(rec) {
   const atBottom = activityEl.scrollHeight - activityEl.scrollTop - activityEl.clientHeight < 60;
   const k = rec.kind;
-  // token-level deltas (live session runs): append to the current thinking/output block
-  if (k === "thinking_delta" || k === "text_delta") {
+  if (k === "step" || k === "audit_step") {
+    startActGroup('<span class="act-step">→ <b>' + esc(rec.tool || "tool") + '</b>' + (rec.step ? ' <span class="muted">step ' + rec.step + '</span>' : "") + '</span><span class="act-time">' + nowTime() + '</span>');
+  } else if (k === "thinking_delta" || k === "text_delta") {
     const bk = k === "thinking_delta" ? "think" : "text";
+    const body = ensureGroup();
     if (!curBlockEl || curBlockKind !== bk) {
-      activityEl.insertAdjacentHTML("beforeend", '<div class="act act-' + bk + '"><span class="act-k">' + (bk === "think" ? "thinking" : "output") + '</span><pre></pre></div>');
-      curBlockEl = activityEl.lastElementChild.querySelector("pre");
+      body.insertAdjacentHTML("beforeend", '<div class="act act-' + bk + '"><span class="act-k">' + (bk === "think" ? "thinking" : "output") + '</span><pre></pre></div>');
+      curBlockEl = body.lastElementChild.querySelector("pre");
       curBlockKind = bk;
     }
     curBlockEl.textContent += rec.delta || "";
   } else {
-    // any non-delta event ends the in-progress block
     curBlockEl = null; curBlockKind = null;
+    const body = ensureGroup();
     let html = "";
     if (k === "audit_thinking") html = '<div class="act act-think"><span class="act-k">thinking</span><pre>' + esc(rec.text) + '</pre></div>';
     else if (k === "audit_text") html = '<div class="act act-text"><span class="act-k">output</span><pre>' + esc(rec.text) + '</pre></div>';
-    else if (k === "step" || k === "audit_step") html = '<div class="act act-step">→ <b>' + esc(rec.tool) + '</b></div>';
     else if (k === "audit_tool_error") html = '<div class="act act-err">tool error: ' + esc(rec.tool) + '</div>';
     else if (["audit_map_done", "audit_scope_progress", "audit_dig_done", "audit_confirm_start", "audit_confirm_done", "audit_done", "audit_session_budget"].includes(k))
       html = '<div class="act act-ms">' + esc(k.replace("audit_", "")) + " " + esc(actSummary(rec)) + '</div>';
     if (!html) return;
-    activityEl.insertAdjacentHTML("beforeend", html);
+    body.insertAdjacentHTML("beforeend", html);
   }
   if (atBottom) activityEl.scrollTop = activityEl.scrollHeight;
 }
