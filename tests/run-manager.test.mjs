@@ -108,6 +108,29 @@ test("specToConfig: posture per verb + unbounded budgets by default", () => {
   assert.equal(capped.auditRemap, true);
 });
 
+test("specToConfig: a project dir + relative materials resolve under the daemon workspace", () => {
+  const cfg = specToConfig(
+    { verb: "run", target: "p", dir: "myproj", sourcePaths: ["src", "lib"], buildRoot: ".", corpusPaths: ["docs/specs"] },
+    "runs",
+    "/ws",
+  );
+  assert.equal(cfg.sourcePaths[0], path.resolve("/ws/myproj/src"));
+  assert.equal(cfg.sourcePaths[1], path.resolve("/ws/myproj/lib"));
+  assert.equal(cfg.buildRoot, path.resolve("/ws/myproj")); // "." resolves to the project root
+  assert.equal(cfg.corpusPaths[0], path.resolve("/ws/myproj/docs/specs"));
+});
+
+test("specToConfig: per-phase models from the profile land on cfg.models; no dir = materials as-is", () => {
+  const cfg = specToConfig(
+    { verb: "run", target: "p", sourcePaths: ["/abs/x"], models: { map: { thinking: "low" }, dig: { model: "big" } } },
+    "runs",
+    "/ws",
+  );
+  assert.equal(cfg.sourcePaths[0], "/abs/x"); // no dir → used verbatim (ad-hoc/legacy)
+  assert.equal(cfg.models.map.thinking, "low");
+  assert.equal(cfg.models.dig.model, "big");
+});
+
 test("store: a supervisor reconciles a dead process's still-running row", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "flounder-reconcile-"));
   const db = new MetadataStore(path.join(dir, "flounder.db"));

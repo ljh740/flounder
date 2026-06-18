@@ -4,8 +4,9 @@
 // to fan a daemon's token-level activity out to the UI's live log. Execution itself lives in
 // the daemon (src/server/daemon.ts); this module holds no run state.
 
+import path from "node:path";
 import { defaultConfig, type AuditorConfig } from "../config.js";
-import type { RunKind } from "../db/store.js";
+import type { RunKind, ProviderRoles } from "../db/store.js";
 
 const DEFAULT_OUT = "runs";
 const THINKING = new Set(["minimal", "low", "medium", "high", "xhigh"]);
@@ -58,20 +59,28 @@ export interface LaunchSpec {
   scope?: string | undefined; // audit: scope id[,id...]
   quick?: boolean | undefined; // run: a single breadth pass instead of map -> audit
   mockLlm?: boolean | undefined; // run with the deterministic offline model (no provider needed)
+  dir?: string | undefined; // project subdir under the daemon workspace; materials resolve under it
+  models?: ProviderRoles | undefined; // per-phase provider/model/thinking overrides (from the selected profile)
   out?: string | undefined;
 }
 
-// Translate a launch spec into an AuditorConfig — the in-process equivalent of the CLI's
+// Translate a launch spec into an AuditorConfig — the daemon's equivalent of the CLI's
 // parseConfig + applyAuditPosture. Budgets are UNBOUNDED unless the spec caps them.
-export function specToConfig(spec: LaunchSpec, out: string): AuditorConfig {
+// `workspace` is the daemon's root: when the spec carries a project `dir`, materials are
+// RELATIVE to <workspace>/<dir>; otherwise they are used as-is (ad-hoc/legacy specs).
+export function specToConfig(spec: LaunchSpec, out: string, workspace?: string): AuditorConfig {
   const cfg = defaultConfig();
   cfg.targetName = spec.target;
-  cfg.sourcePaths = spec.sourcePaths;
-  cfg.corpusPaths = spec.corpusPaths ?? [];
-  if (spec.buildRoot) cfg.buildRoot = spec.buildRoot;
+  const root = spec.dir !== undefined ? path.resolve(workspace ?? ".", spec.dir) : undefined;
+  const resolveMat = (p: string): string => (root ? path.resolve(root, p) : p);
+  cfg.sourcePaths = spec.sourcePaths.map(resolveMat);
+  cfg.corpusPaths = (spec.corpusPaths ?? []).map(resolveMat);
+  if (spec.buildRoot) cfg.buildRoot = resolveMat(spec.buildRoot);
+  else if (root) cfg.buildRoot = root; // default the buildable root to the whole project dir
   if (spec.provider) cfg.provider = spec.provider;
   if (spec.model) cfg.auditModel = spec.model;
   if (spec.thinking && THINKING.has(spec.thinking)) cfg.thinkingLevel = spec.thinking as AuditorConfig["thinkingLevel"];
+  if (spec.models) cfg.models = spec.models as NonNullable<AuditorConfig["models"]>;
   cfg.outputDir = out;
   cfg.auditMaxSteps = spec.maxSteps ?? Number.POSITIVE_INFINITY;
   cfg.auditMapSteps = spec.mapSteps ?? Number.POSITIVE_INFINITY;

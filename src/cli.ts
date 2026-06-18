@@ -36,12 +36,13 @@ async function main(argv: string[]): Promise<void> {
     const port = readIntFlag(rest, "--port") ?? 4500;
     const host = readFlag(rest, "--host") ?? "127.0.0.1";
     const out = readFlag(rest, "--out") ?? "runs";
+    const workspace = readFlag(rest, "--workspace") ?? "./workspace"; // where the co-located daemon finds project dirs
     const server = startUiServer({ out, port, host });
     if (rest.includes("--no-daemon")) {
       console.log("[flounder ui] --no-daemon: no executor started. Connect one with `flounder daemon --server <url> --token <token>`.");
     } else {
       const concurrency = readIntFlag(rest, "--concurrency");
-      server.on("listening", () => spawnLocalDaemon({ out, url: `http://${host}:${port}`, ...(concurrency !== undefined ? { concurrency } : {}) }));
+      server.on("listening", () => spawnLocalDaemon({ out, url: `http://${host}:${port}`, workspace, ...(concurrency !== undefined ? { concurrency } : {}) }));
     }
     await new Promise(() => {}); // run until the process is interrupted
     return;
@@ -56,8 +57,9 @@ async function main(argv: string[]): Promise<void> {
     if (!server || !token) throw new Error("flounder daemon needs --server <url> and --token <token> (mint one with `flounder ui`, or via the store)");
     const out = readFlag(rest, "--out") ?? "runs";
     const name = readFlag(rest, "--name");
+    const workspace = readFlag(rest, "--workspace");
     const concurrency = readIntFlag(rest, "--concurrency");
-    await runDaemon({ server, token, out, ...(name ? { name } : {}), ...(concurrency !== undefined ? { concurrency } : {}) });
+    await runDaemon({ server, token, out, ...(name ? { name } : {}), ...(workspace ? { workspace } : {}), ...(concurrency !== undefined ? { concurrency } : {}) });
     return; // runDaemon loops forever (until interrupted)
   }
 
@@ -254,11 +256,12 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
 // Spawn a co-located daemon for `flounder ui`: mint a fresh bearer token in the shared store,
 // then run `flounder daemon` as a child pointed at the just-started server. The child dies with
 // the parent. (A remote daemon is started the same way, by hand, on another machine.)
-function spawnLocalDaemon(opts: { out: string; url: string; concurrency?: number }): void {
+function spawnLocalDaemon(opts: { out: string; url: string; workspace?: string; concurrency?: number }): void {
   const store = MetadataStore.openForOutput(opts.out);
   const { token } = store.createDaemonToken(`local-${process.pid}`);
   store.close();
   const args = [fileURLToPath(import.meta.url), "daemon", "--server", opts.url, "--token", token, "--out", opts.out];
+  if (opts.workspace) args.push("--workspace", opts.workspace);
   if (opts.concurrency !== undefined) args.push("--concurrency", String(opts.concurrency));
   const child = spawn(process.execPath, args, { stdio: "inherit" });
   child.on("error", (error) => console.error(`[flounder ui] could not start local daemon: ${error.message}`));

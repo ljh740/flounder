@@ -4,6 +4,7 @@
 // nudges, POST for run start / updates / activity. It can run on a different machine than
 // the server — the server owns the DB; the daemon never touches it.
 
+import path from "node:path";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
 import { MockAuditLlmClient } from "../llm/mock.js";
@@ -19,6 +20,7 @@ export interface DaemonOptions {
   out?: string;
   name?: string;
   concurrency?: number;
+  workspace?: string; // root under which project dirs live; materials resolve here (default ./workspace)
 }
 
 type Activity = { kind: string; delta?: string; tool?: string; step?: number };
@@ -27,12 +29,13 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
   const base = opts.server.replace(/\/$/, "");
   const headers = { authorization: `Bearer ${opts.token}`, "content-type": "application/json" };
   const out = opts.out ?? "runs";
+  const workspace = path.resolve(opts.workspace ?? "workspace"); // where project dirs (and their relative materials) live
   const maxConcurrent = Math.max(1, opts.concurrency ?? 2);
   const inflight = new Map<number, AbortController>(); // jobId -> abort
 
-  const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", capabilities: {} }) }).catch(() => null);
+  const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", capabilities: {}, workspace }) }).catch(() => null);
   if (!reg || !reg.ok) throw new Error(`daemon: could not register with ${base} (status ${reg ? reg.status : "no response"}) — check --server and --token`);
-  console.log(`[flounder daemon] connected to ${base}  (out=${out}, concurrency=${maxConcurrent})`);
+  console.log(`[flounder daemon] connected to ${base}  (out=${out}, workspace=${workspace}, concurrency=${maxConcurrent})`);
 
   const claimLoop = async (): Promise<void> => {
     while (inflight.size < maxConcurrent) {
@@ -55,7 +58,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       return tracker;
     };
     try {
-      const cfg = specToConfig(spec, out);
+      const cfg = specToConfig(spec, out, workspace);
       if (spec.verb === "confirm") {
         if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir");
         await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });

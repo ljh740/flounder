@@ -14,7 +14,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { MetadataStore, type RunKind, type Coverage, type ProviderInput } from "../db/store.js";
+import { MetadataStore, type RunKind, type Coverage, type ProviderInput, type ProviderProfile, type ProjectInput } from "../db/store.js";
 import { getProviders, getModels } from "@earendil-works/pi-ai";
 import { type LaunchSpec, ActivityBus } from "./run-manager.js";
 import { projectHistoryDir } from "../trace/history.js";
@@ -355,12 +355,33 @@ function withProject(c: Ctx, fn: (projectId: number, project: Record<string, unk
   fn(Number(project.id), project);
 }
 
+// The editable project fields shared by create + update (materials are relative paths now;
+// providerId selects a profile; dir is the subdir under the daemon workspace).
+interface ProjectBody {
+  sourcePaths?: string[];
+  buildRoot?: string;
+  corpusPaths?: string[];
+  config?: unknown;
+  providerId?: number | null;
+  dir?: string;
+}
+function projectFields(body: ProjectBody): Omit<ProjectInput, "name"> {
+  return {
+    sourcePaths: body.sourcePaths,
+    buildRoot: body.buildRoot,
+    corpusPaths: body.corpusPaths,
+    config: body.config,
+    providerId: typeof body.providerId === "number" ? body.providerId : undefined,
+    dir: typeof body.dir === "string" && body.dir.trim() ? body.dir.trim() : undefined,
+  };
+}
+
 async function projectCreate(c: Ctx): Promise<void> {
-  const body = (await readBody(c.req)) as { name?: string; sourcePaths?: string[]; buildRoot?: string; corpusPaths?: string[]; config?: unknown };
+  const body = (await readBody(c.req)) as ProjectBody & { name?: string };
   const name = (body.name ?? "").trim();
   if (!name) return sendJson(c.res, 400, { error: "project name is required" });
   if (c.store.getProject(name)) return sendJson(c.res, 409, { error: `a project named "${name}" already exists` });
-  c.store.upsertProject({ name, sourcePaths: body.sourcePaths, buildRoot: body.buildRoot, corpusPaths: body.corpusPaths, config: body.config });
+  c.store.upsertProject({ name, ...projectFields(body) });
   sendJson(c.res, 200, { ok: true, name });
 }
 
@@ -382,8 +403,8 @@ function projectGet(c: Ctx): void {
 async function projectUpdate(c: Ctx): Promise<void> {
   const project = c.store.getProject(c.params.name ?? "");
   if (!project) return sendJson(c.res, 404, { error: `no project named ${c.params.name}` });
-  const body = (await readBody(c.req)) as { sourcePaths?: string[]; buildRoot?: string; corpusPaths?: string[]; config?: unknown };
-  c.store.upsertProject({ name: String(project.name), sourcePaths: body.sourcePaths, buildRoot: body.buildRoot, corpusPaths: body.corpusPaths, config: body.config });
+  const body = (await readBody(c.req)) as ProjectBody;
+  c.store.upsertProject({ name: String(project.name), ...projectFields(body) });
   sendJson(c.res, 200, { ok: true });
 }
 
@@ -422,7 +443,8 @@ async function runLaunch(c: Ctx): Promise<void> {
   const project = c.store.getProject(c.params.name ?? "");
   if (!project) return sendJson(c.res, 404, { error: `no project named ${c.params.name}` });
   const body = (await readBody(c.req)) as Record<string, unknown>;
-  const spec = launchSpec(project, body, c.out);
+  const profile = project.provider_id != null ? c.store.getProvider(Number(project.provider_id)) : undefined;
+  const spec = launchSpec(project, body, c.out, profile);
   const jobId = c.store.enqueueJob(spec.target, spec);
   c.plane.nudge();
   sendJson(c.res, 200, { jobId, verb: spec.verb, queued: true, daemons: c.plane.daemonCount() });
@@ -549,8 +571,8 @@ function daemonAuth(c: Ctx): Record<string, unknown> | null {
 async function daemonRegister(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
-  const body = (await readBody(c.req)) as { name?: string; capabilities?: unknown };
-  c.store.touchDaemon(Number(daemon.id), body.capabilities);
+  const body = (await readBody(c.req)) as { name?: string; capabilities?: unknown; workspace?: string };
+  c.store.touchDaemon(Number(daemon.id), body.capabilities, body.workspace);
   sendJson(c.res, 200, { ok: true, daemonId: Number(daemon.id), name: daemon.name });
 }
 
@@ -703,7 +725,7 @@ function streamSnapshots(res: ServerResponse, store: MetadataStore): void {
 // Build a launch spec from the project's stored materials/config + the request body
 // (verb + run-shape flags + optional one-off overrides). Unbounded (null) budgets stay
 // undefined so the kernel's unbounded default applies.
-function launchSpec(project: Record<string, unknown>, body: Record<string, unknown>, out: string): LaunchSpec {
+function launchSpec(project: Record<string, unknown>, body: Record<string, unknown>, out: string, profile?: ProviderProfile): LaunchSpec {
   const cfg = (safeParse(project.config_json) as Record<string, unknown>) ?? {};
   const overrides = (body.overrides as Record<string, unknown>) ?? {};
   const merged = { ...cfg, ...((overrides.config as Record<string, unknown>) ?? {}) };
@@ -713,15 +735,20 @@ function launchSpec(project: Record<string, unknown>, body: Record<string, unkno
     const arr = Array.isArray(v) ? v : (safeParse(fallback) as unknown[]) ?? [];
     return arr.filter((x): x is string => typeof x === "string");
   };
+  // Provider/model/thinking + per-phase overrides come from the selected profile; fall back
+  // to inline config for legacy projects with no profile. Materials are RELATIVE to the
+  // project dir (resolved on the daemon against its workspace); dir defaults to the name.
   return {
     verb: (typeof body.verb === "string" ? body.verb : "run") as RunKind,
     target: String(project.name),
+    dir: str(project.dir) ?? String(project.name),
     sourcePaths: list(overrides.sourcePaths, project.source_paths),
     buildRoot: str(overrides.buildRoot) ?? str(project.build_root),
     corpusPaths: list(overrides.corpusPaths, project.corpus_paths),
-    provider: str(merged.provider),
-    model: str(merged.model),
-    thinking: str(merged.thinking),
+    provider: profile?.provider ?? str(merged.provider),
+    model: profile?.model ?? str(merged.model),
+    thinking: profile?.thinking ?? str(merged.thinking),
+    models: profile && Object.keys(profile.roles).length > 0 ? profile.roles : undefined,
     maxScopes: num(merged.maxScopes),
     mapSteps: num(merged.mapSteps),
     digSteps: num(merged.digSteps),
