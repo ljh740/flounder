@@ -13,6 +13,8 @@ The main layers are:
 - Reporting and history: `src/reports`, `src/trace`, and `src/agent/memory.ts`.
 - Provider adapters: `src/llm/pi-ai.ts`, with explicit local CLI fallbacks in `src/llm/codex-cli.ts` and `src/llm/claude-code.ts`.
 - Pi integration: `src/pi/extension.ts` registers the `fsa_run` and `fsa_confirm` tools and the shell guardrail.
+- Tracking store: `src/db/store.ts` records every run's metadata to SQLite (see [Tracking, API, and UI](#tracking-api-and-ui)).
+- Server / UI: `src/server/` (run-manager + localhost REST API + web dashboard).
 
 ## Audit Flow
 
@@ -179,6 +181,32 @@ For blind benchmarks with `provider=codex-cli`, set `FSA_CODEX_WEB_SEARCH=disabl
 The package extension exposes two tools — `fsa_run` (the sealed map→dig audit) and `fsa_confirm` (the open-world reproduction pass over a finished run) — and installs the shared shell-command guardrail. The two mirror the `fsa run` / `fsa confirm` CLI verbs so a pi agent can orchestrate audit→confirm; the narrower verbs (`map`, `audit <region>/--scope/--verify`) stay CLI-only. It does not expose a staged audit driver.
 
 The command guardrail lives in `src/security/policy.ts` so non-pi integrations can reuse the same policy.
+
+## Tracking, API, and UI
+
+A second surface tracks and drives audits across projects. It is additive: the audit kernel is unchanged, and a run produces the same files whether launched from the CLI or this surface.
+
+```mermaid
+flowchart LR
+  UI["Web dashboard (SPA)"] -->|HTTP / SSE| SRV["server (src/server/app.ts)"]
+  AGENT["AI agent"] -->|REST + GET /api catalog| SRV
+  SRV --> MGR["run-manager (src/server/run-manager.ts)"]
+  MGR -->|in-process| LIB["runAudit / runConfirm"]
+  LIB -->|RunRecorder| DB[("SQLite (src/db) — fsa.db")]
+  LIB --> FILES["run dir: events.jsonl, audit_findings.json, reports"]
+  SRV -->|read| DB
+  SRV -->|tail events.jsonl| FILES
+```
+
+**Tracking store (`src/db/store.ts`, `record.ts`).** SQLite via `node:sqlite` (no dependency added) at `<out>/fsa.db`, WAL + busy-timeout so a reader (the server) and writers (runs) coexist. It is the **system of record for run tracking**, written live — not a rebuildable projection: projects, the run lifecycle, scope coverage (mapped vs audited, per-dig), findings and their status transitions (suspect→confirm→refute, on a `finding_status_event` timeline), and confirm decisions. It stores metadata + **paths** to the on-disk artifacts, not their content. `RunRecorder` (`src/db/record.ts`) is the failure-isolated bridge from the kernel's in-memory types to store rows — it never throws into a run. Findings map the kernel `confirmationStatus`, with a skeptic-disputed finding surfaced as `refuted`.
+
+**Run-manager (`src/server/run-manager.ts`).** Launches audits **in-process via the library** (`runAudit`/`runConfirm`) rather than spawning the CLI — the CLI is a thin wrapper over the same functions, so calling them directly yields the rich `AuditRunResult`/`ConfirmRunResult` and finer hooks: `specToConfig(spec)` is the in-process equivalent of `parseConfig` + `applyAuditPosture` (posture per verb, unbounded budgets by default, remap/quick/region/scope/mock); `options.signal` (an `AbortSignal`) makes "stop" cooperative (→ `session.abort()`, the run finalizes as `killed`); `options.onRun` reports the DB run id. The audit's heavy work (builds, tests) still runs in sandboxed subprocesses spawned by the `bash` tool. Because runs are in-process, a server restart ends them — startup reconciles any still-`running` row to `killed`.
+
+**REST API + self-describing catalog (`src/server/app.ts`).** A localhost-only `node:http` server (it executes audits and reads local code, so it never binds beyond `127.0.0.1`). Every workflow operation is a REST resource so an AI agent can drive the whole flow without the UI: **project** (CRUD), **run** (`POST /api/projects/:name/runs` to launch, `GET /api/runs/:id` incl. the rich library result, `POST /api/runs/:id/stop`), and read-only **scope** / **finding** (paginated + filterable) / **confirm-decision**. `GET /api` returns a catalog of every endpoint (method, path, params, body, summary) — an agent fetches it once to learn the surface. Routing is a data-driven table, so the catalog and the handlers cannot drift.
+
+**Live streams.** `GET /api/stream` (SSE) pushes the project snapshot ~1/s (computed from aggregate queries, so it stays cheap with many findings). `GET /api/runs/:id/log` (SSE) streams a run's live activity: for a run launched in this server session it streams the model's **thinking/output tokens** directly from the in-process session (via an `onActivity` hook → an in-memory bus); for any other run it tails the persisted `events.jsonl` (block-level history).
+
+**UI (`src/server/public/index.html`).** A zero-dependency vanilla SPA styled to GitHub's Primer (light default + dark toggle). It is **one client of the API above** — it can be ignored entirely in favor of the API. Per-project dashboard: scope coverage, findings + status timeline, the bugs actually **confirmed** on the real target (front and center), an "Edit config" form, a live-activity panel (the model's thinking), and Start/Continue/Restart/Run/Stop/Delete — each a single API call.
 
 ## Runnable Gates
 

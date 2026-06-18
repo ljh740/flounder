@@ -29,7 +29,8 @@ export async function saveScopeInventory(historyDir: string, scopes: AuditScope[
   await writeFile(scopesPath(historyDir), `${JSON.stringify(scopes, null, 2)}\n`);
 }
 
-export function scopeProgress(scopes: AuditScope[]): { total: number; audited: number; pending: number } {
+export function scopeProgress(scopes: AuditScope[]): { total: number; audited: number; pending: number; deferred: number } {
   const audited = scopes.filter((scope) => scope.status === "audited").length;
-  return { total: scopes.length, audited, pending: scopes.length - audited };
+  const deferred = scopes.filter((scope) => scope.status === "deferred").length;
+  return { total: scopes.length, audited, deferred, pending: scopes.length - audited - deferred };
 }

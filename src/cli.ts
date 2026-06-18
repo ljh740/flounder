@@ -5,6 +5,8 @@ import { runAudit } from "./agent/audit.js";
 import { runConfirm } from "./agent/confirm.js";
 import { MockAuditLlmClient } from "./llm/mock.js";
 import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/history.js";
+import { MetadataStore } from "./db/store.js";
+import { startUiServer } from "./server/app.js";
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
@@ -15,6 +17,21 @@ async function main(argv: string[]): Promise<void> {
 
   if (cmd === "history") {
     await runHistoryCommand(rest);
+    return;
+  }
+
+  if (cmd === "db") {
+    runDbCommand(rest);
+    return;
+  }
+
+  if (cmd === "ui") {
+    // Local web app: track/drive audits across projects. Keeps running (the server holds
+    // the event loop open) until interrupted. Binds to localhost only.
+    const port = readIntFlag(rest, "--port");
+    const out = readFlag(rest, "--out") ?? "runs";
+    startUiServer({ out, ...(port !== undefined ? { port } : {}) });
+    await new Promise(() => {}); // run until the process is interrupted
     return;
   }
 
@@ -35,6 +52,7 @@ async function main(argv: string[]): Promise<void> {
     if (readIntFlag(rest, "--dig-steps") === undefined) cfg.auditDigSteps = Number.POSITIVE_INFINITY;
     const result = await runAudit(cfg, {
       streamEvents: true,
+      kind: cmd as "run" | "map" | "audit",
       ...(hasFlag(rest, "--mock-llm") ? { llm: new MockAuditLlmClient() } : {}),
     });
     printCoverage(result.runDir, result.summary.coverage);
@@ -259,6 +277,75 @@ async function runHistoryCommand(args: string[]): Promise<void> {
   console.log(`[history] runs=${manifest.aggregate.totalRuns} materials=${manifest.aggregate.materialsTotal} findings=${manifest.aggregate.findingsTotal}`);
 }
 
+// Read view over the SQLite tracking store (the UI's future backend; usable from the CLI
+// today). `fsa db projects` | `runs [<target>]` | `findings <target>`.
+function runDbCommand(args: string[]): void {
+  const [subcommand = "projects", ...rest] = args;
+  const out = readFlag(args, "--out") ?? "runs";
+  const positional = rest.find((token) => !token.startsWith("--"));
+  const target = readFlag(args, "--target") ?? positional;
+  const db = MetadataStore.openForOutput(out);
+  try {
+    if (subcommand === "projects") {
+      const projects = db.listProjects();
+      if (projects.length === 0) {
+        console.log("(no projects tracked yet — run `fsa run` first, or check --out)");
+        return;
+      }
+      for (const project of projects) {
+        const id = Number(project.id);
+        const progress = db.scopeProgress(id);
+        const runs = db.listRuns(id);
+        const findings = db.listFindings(id);
+        const latest = runs[0];
+        console.log(`• ${project.name}`);
+        console.log(`    scopes:   ${progress.audited}/${progress.total} audited (${progress.pending} pending)`);
+        console.log(`    findings: ${findings.length}  ${formatStatusCounts(findings)}`);
+        console.log(`    runs:     ${runs.length}${latest ? `  latest: ${latest.kind} [${latest.status}] ${latest.run_dir ?? ""}` : ""}`);
+      }
+      return;
+    }
+    const projectId = resolveProjectId(db, target);
+    if (subcommand === "runs") {
+      for (const run of db.listRuns(projectId)) {
+        console.log(`${run.started_at}  ${run.kind} [${run.status}]  scopes ${run.scopes_audited ?? "-"}/${run.scopes_total ?? "-"}  findings ${run.findings_total ?? "-"}  ${run.run_dir ?? ""}`);
+      }
+      return;
+    }
+    if (subcommand === "findings") {
+      for (const finding of db.listFindings(projectId)) {
+        const timeline = db.findingTimeline(Number(finding.id)).map((event) => event.to_status).join(" → ");
+        console.log(`[${finding.status}] ${finding.title} (${finding.location ?? "?"})  ${timeline}`);
+      }
+      return;
+    }
+    throw new Error(`Unknown db command "${subcommand}". Use: fsa db projects | runs [--target <name>] | findings --target <name>`);
+  } finally {
+    db.close();
+  }
+}
+
+function resolveProjectId(db: MetadataStore, target: string | undefined): number {
+  const projects = db.listProjects();
+  if (!target) {
+    const only = projects[0];
+    if (projects.length === 1 && only) return Number(only.id);
+    throw new Error("--target <name> is required (multiple projects tracked)");
+  }
+  const match = projects.find((project) => project.name === target);
+  if (!match) throw new Error(`no tracked project named "${target}"`);
+  return Number(match.id);
+}
+
+function formatStatusCounts(findings: Array<Record<string, unknown>>): string {
+  const counts = new Map<string, number>();
+  for (const finding of findings) {
+    const status = String(finding.status);
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([status, count]) => `${count} ${status}`).join(", ");
+}
+
 function projectHistoryLocation(cfg: AuditorConfig): { outputDir: string; targetName: string; historyDir?: string } {
   return {
     outputDir: cfg.outputDir,
@@ -276,6 +363,8 @@ Usage:
   fsa audit   [<region> | --scope <id,...> | --verify <file>] --source ...   deep-audit a region, inventory scopes, or given claims
   fsa confirm <run-dir> --source <paths...>                                  open-world: reproduce a run's findings on the real target
   fsa history import-run --target <name> --run <dir>
+  fsa db      [projects | runs [<target>] | findings <target>]               read the SQLite tracking store (projects, runs, coverage, findings)
+  fsa ui      [--port <n>] [--out <dir>]                                      local web dashboard: track/drive audits across projects (localhost only)
 
 Sealed vs open world:
   run / map / audit are NETWORK-SEALED — the model finds and proves bugs blind, with no

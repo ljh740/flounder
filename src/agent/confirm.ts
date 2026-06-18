@@ -10,6 +10,7 @@ import { RunLogger } from "../trace/logger.js";
 import type { Doc } from "../types.js";
 import { publicPath } from "../util/paths.js";
 import { consolidateByFixEquivalence, type FixEquivEdge, type FixEquivItem } from "./consolidate.js";
+import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
 import { ProjectMemory } from "./memory.js";
 import { isPiSessionProvider, runAuditSession } from "./pi-session.js";
 import { buildTools, newSession, type AgentSession, type FixPatch, type ToolContext } from "./tools.js";
@@ -36,7 +37,7 @@ interface ConfirmProvenance {
 
 export async function runConfirm(
   cfg: AuditorConfig,
-  options: { inputRunDir: string; maxSteps?: number; fresh?: boolean; streamEvents?: boolean },
+  options: { inputRunDir: string; maxSteps?: number; fresh?: boolean; streamEvents?: boolean; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory },
 ): Promise<ConfirmRunResult> {
   // Confirm needs a real agent that can fork a live network and run real nodes; the
   // mock/CLI fallbacks cannot, so this mode requires a pi-session provider.
@@ -70,6 +71,9 @@ export async function runConfirm(
   if (priorFindings.length === 0) {
     throw new Error(`fsa confirm: no confirmed findings in ${path.join(inputRunDir, "audit_findings.json")} (point it at a completed run dir).`);
   }
+  // SQLite tracking: record a `confirm` run under the same project (failure-isolated).
+  const recorder = (options.makeTracker ?? RunRecorder.start)(confirmCfg, logger.runDir, "confirm", logger);
+  if (recorder.runDbId !== undefined) options.onRun?.(recorder.runDbId);
   // RESUME (auto, unless --fresh): an interrupted prior confirm of THIS input run left a
   // decision sheet; carry its already-SETTLED rows (reproduced yes/no) forward and tell
   // the model to skip them, so a re-run continues instead of re-reproducing from scratch.
@@ -117,6 +121,11 @@ export async function runConfirm(
     cwd: workspace.absolute,
     fileManifest: renderFileManifest(source, corpusManifest),
     confirm: seed,
+    // Project the decision rows to SQLite each turn so a UI shows live reproduction
+    // progress (reproduced X / N) during the run, not only at the end.
+    onConfirmCheckpoint: (raw) => recorder.confirmDecisions(toLiveConfirmRows(raw)),
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.onActivity ? { onActivity: options.onActivity } : {}),
   });
 
   // 5. Read the model's decision rows, then CONSOLIDATE by execution: run the
@@ -166,6 +175,13 @@ export async function runConfirm(
     submitCandidates: rows.filter((row) => row.recommendation === "submit-candidate").length,
   });
   await writeLastRunPointer(path.dirname(logger.runDir), logger.runDir, `${confirmCfg.targetName}-confirm`);
+
+  // SQLite tracking: the decision sheet (one row per distinct bug) + mark the run done.
+  recorder.confirmDecisions(
+    rows.map((row) => ({ bug: row.bug, reproduced: row.reproduced, recommendation: row.recommendation, members: row.members })),
+    path.join(logger.runDir, "confirm_report.md"),
+  );
+  recorder.finish(options.signal?.aborted ? "killed" : "done");
 
   return { runDir: logger.runDir, decisionRows: rows.length };
 }
@@ -274,6 +290,23 @@ function renderFileManifest(source: Doc[], corpusEntries: string[]): string {
     out += `\n\nFrozen prior-run report + per-finding disclosures under corpus/:\n${corpusEntries.map((entry) => `- ${entry}`).join("\n")}`;
   }
   return out;
+}
+
+// Map the model's raw, mid-run decision rows to the minimal shape the tracker stores, for
+// LIVE reproduction progress. The end-of-run write replaces these with the consolidated set.
+function toLiveConfirmRows(raw: unknown[]): Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }> {
+  const rows: Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }> = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const obj = entry as Record<string, unknown>;
+    if (typeof obj.bug !== "string" || !obj.bug.trim()) continue;
+    const row: { bug: string; reproduced?: string; recommendation?: string; members?: string[] } = { bug: obj.bug };
+    if (typeof obj.reproduced === "string") row.reproduced = obj.reproduced;
+    if (typeof obj.recommendation === "string") row.recommendation = obj.recommendation;
+    if (Array.isArray(obj.members)) row.members = obj.members.filter((m): m is string => typeof m === "string");
+    rows.push(row);
+  }
+  return rows;
 }
 
 // --- decision sheet ----------------------------------------------------------

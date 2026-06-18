@@ -48,6 +48,15 @@ export async function runAuditSession(input: {
   verify?: string;
   /** Confirm mode: the open-world reproduce/consolidate/decide pass over a prior run's findings. */
   confirm?: string;
+  /** Called each turn in confirm mode with the decision rows written so far (raw), so a
+   * tracker can project live reproduction progress. Best-effort; must not throw. */
+  onConfirmCheckpoint?: (rows: unknown[]) => void;
+  /** Abort the run cooperatively (e.g. a UI "stop"): aborts the underlying agent session. */
+  signal?: AbortSignal;
+  /** Live activity for a UI: fired per streaming delta (thinking_delta / text_delta — token
+   * level) and per tool call (step). Best-effort, must not throw. Separate from the
+   * block-level events.jsonl logging, which persists the same content for later review. */
+  onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void;
 }): Promise<SessionDriverResult> {
   const model = getModelSafe(input.cfg.provider, input.cfg.auditModel);
   if (!model) throw new Error(`audit session: unknown provider/model ${input.cfg.provider}/${input.cfg.auditModel}`);
@@ -68,6 +77,12 @@ export async function runAuditSession(input: {
     cwd: input.cwd,
     sessionManager: SessionManager.inMemory(),
   });
+
+  // Cooperative stop (e.g. a UI "stop" on an in-process run): abort the agent session.
+  if (input.signal) {
+    if (input.signal.aborted) void session.abort();
+    else input.signal.addEventListener("abort", () => void session.abort(), { once: true });
+  }
 
   // Budget: the continuous session runs until the model stops on its own. A finite
   // auditMaxSteps caps the number of model turns so a run cannot grow unbounded in
@@ -103,14 +118,34 @@ export async function runAuditSession(input: {
     if (raw === undefined) return;
     try {
       const parsed: unknown = JSON.parse(raw);
-      if (Array.isArray(parsed)) await input.logger.artifact("confirm_decision.json", parsed);
+      if (Array.isArray(parsed)) {
+        await input.logger.artifact("confirm_decision.json", parsed);
+        try {
+          input.onConfirmCheckpoint?.(parsed);
+        } catch {
+          // live projection is best-effort
+        }
+      }
     } catch {
       // partial / mid-write JSON — skip this checkpoint
     }
   };
+  // Accumulate the model's streaming reasoning/output and log each block when it ends, so
+  // a UI can tail events.jsonl and show the LLM's thinking + output live (block-level, not
+  // token-by-token — readable and cheap). pi surfaces deltas via message_update's
+  // assistantMessageEvent (from @earendil-works/pi-ai: thinking_delta / text_delta / *_end).
+  let thinkingBuf = "";
+  let textBuf = "";
   const unsubscribe = session.subscribe((event) => {
-    if (event.type === "tool_execution_start") {
+    if (event.type === "message_update") {
+      const ame = event.assistantMessageEvent;
+      if (ame.type === "thinking_delta") { thinkingBuf += ame.delta; try { input.onActivity?.({ kind: "thinking_delta", delta: ame.delta }); } catch {} }
+      else if (ame.type === "thinking_end") { if (thinkingBuf.trim()) void input.logger.event("audit_thinking", { text: thinkingBuf.trim() }); thinkingBuf = ""; }
+      else if (ame.type === "text_delta") { textBuf += ame.delta; try { input.onActivity?.({ kind: "text_delta", delta: ame.delta }); } catch {} }
+      else if (ame.type === "text_end") { if (textBuf.trim()) void input.logger.event("audit_text", { text: textBuf.trim() }); textBuf = ""; }
+    } else if (event.type === "tool_execution_start") {
       void input.logger.event("audit_step", { step: stepNo + 1, tool: event.toolName });
+      try { input.onActivity?.({ kind: "step", tool: event.toolName, step: stepNo + 1 }); } catch {}
     } else if (event.type === "tool_execution_end" && event.isError) {
       void input.logger.event("audit_tool_error", { tool: event.toolName });
     } else if (event.type === "turn_end") {

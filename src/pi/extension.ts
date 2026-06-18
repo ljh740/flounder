@@ -53,7 +53,7 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
       if (params.historyDir !== undefined) cfg.historyDir = params.historyDir;
       cfg.auditDeep = true; // fsa_run = map -> audit, matching the `fsa run` CLI verb
 
-      const result = await runAudit(cfg);
+      const result = await runAudit(cfg, { kind: "run" });
       const confirmed = result.summary.findings.filter((finding) => finding.confirmationStatus === "confirmed-executable").length;
       return {
         content: [

@@ -1,0 +1,183 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { MetadataStore } from "../dist/db/store.js";
+
+// The SQLite metadata store is the system of record for run TRACKING: projects, run
+// lifecycle, scope coverage, findings, and their status transitions. These pin that a
+// run's metadata is queryable and that status changes land on a timeline.
+
+async function tempDb() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "fsa-db-"));
+  return new MetadataStore(path.join(dir, "fsa.db"));
+}
+
+test("store: project + run lifecycle is recorded and queryable", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "acme", sourcePaths: ["./src"], buildRoot: ".", config: { model: "gpt-5.5", thinking: "xhigh" } });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/acme-1", provider: "openai-codex", model: "gpt-5.5" });
+
+  let runs = db.listRuns(projectId);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].status, "running");
+  assert.equal(runs[0].ended_at, null);
+
+  db.finishRun(runId, "done", { total: 10, audited: 4, pending: 6 }, 3);
+  runs = db.listRuns(projectId);
+  assert.equal(runs[0].status, "done");
+  assert.equal(runs[0].scopes_audited, 4);
+  assert.equal(runs[0].findings_total, 3);
+  assert.ok(runs[0].ended_at);
+
+  // upsertProject is idempotent by name (refreshes config, keeps the id)
+  assert.equal(db.upsertProject({ name: "acme", config: { model: "opus" } }), projectId);
+  assert.equal(db.listProjects().length, 1);
+  db.close();
+});
+
+test("store: scope coverage tracks mapped vs audited", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  db.upsertScopes(projectId, [
+    { scopeId: "s1", title: "decode", status: "audited" },
+    { scopeId: "s2", title: "settle", status: "pending" },
+    { scopeId: "s3", title: "withdraw", status: "pending" },
+  ]);
+  assert.deepEqual(db.scopeProgress(projectId), { total: 3, audited: 1, pending: 2, deferred: 0 });
+
+  // re-mapping the same scope id updates it in place (one row per project+scope)
+  db.upsertScopes(projectId, [{ scopeId: "s2", title: "settle", status: "audited" }]);
+  assert.deepEqual(db.scopeProgress(projectId), { total: 3, audited: 2, pending: 1, deferred: 0 });
+  db.close();
+});
+
+test("store: finding status transitions land on a timeline", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/p-1" });
+
+  // first sighting → suspected (from null)
+  db.upsertFindings(projectId, runId, [{ findingKey: "F1", title: "unbound input", status: "suspected" }]);
+  // promoted by the differential gate
+  db.upsertFindings(projectId, runId, [{ findingKey: "F1", title: "unbound input", status: "confirmed-differential" }], "differential passed");
+  // later refuted by the skeptic
+  db.upsertFindings(projectId, runId, [{ findingKey: "F1", title: "unbound input", status: "refuted" }], "vacuous PoC");
+
+  const findings = db.listFindings(projectId);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].status, "refuted");
+
+  const timeline = db.findingTimeline(findings[0].id);
+  assert.deepEqual(timeline.map((e) => [e.from_status, e.to_status]), [
+    [null, "suspected"],
+    ["suspected", "confirmed-differential"],
+    ["confirmed-differential", "refuted"],
+  ]);
+  // an unchanged re-upsert adds no event
+  db.upsertFindings(projectId, runId, [{ findingKey: "F1", title: "unbound input", status: "refuted" }]);
+  assert.equal(db.findingTimeline(findings[0].id).length, 3);
+  db.close();
+});
+
+test("store: finding aggregates + pagination + filter scale to many findings", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "big" });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/big-1" });
+  const statuses = ["confirmed-differential", "suspected", "refuted"];
+  const rows = [];
+  for (let i = 0; i < 120; i++) rows.push({ findingKey: "f" + i, title: "finding " + i + " in gadget", location: "src/c.rs:" + i, status: statuses[i % 3] });
+  db.upsertFindings(projectId, runId, rows);
+
+  // aggregate counts (one GROUP BY, used by the dashboard snapshot)
+  assert.equal(db.countFindings(projectId), 120);
+  assert.equal(db.findingStatusCounts(projectId)["suspected"], 40);
+
+  // pagination: first page of 50, then the next page
+  assert.equal(db.queryFindings(projectId, { limit: 50, offset: 0 }).length, 50);
+  assert.equal(db.queryFindings(projectId, { limit: 50, offset: 100 }).length, 20);
+
+  // status filter + filtered total
+  assert.equal(db.countFindings(projectId, { status: "refuted" }), 40);
+  assert.ok(db.queryFindings(projectId, { status: "refuted", limit: 10 }).every((r) => r.status === "refuted"));
+
+  // text search over title/location
+  assert.equal(db.countFindings(projectId, { search: "gadget" }), 120);
+  assert.equal(db.countFindings(projectId, { search: "src/c.rs:7" }), 11); // :7, :70..:79
+  db.close();
+});
+
+test("store: startup reconciles orphaned running runs (in-process runs don't survive a restart)", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  db.startRun({ projectId, kind: "run", runDir: "/runs/p-1" }); // left running
+  db.finishRun(db.startRun({ projectId, kind: "run", runDir: "/runs/p-2" }), "done");
+  assert.equal(db.reconcileOrphanedRuns(), 1); // only the still-running one
+  assert.equal(db.listRuns(projectId).filter((r) => r.status === "running").length, 0);
+  assert.equal(db.reconcileOrphanedRuns(), 0); // idempotent
+  db.close();
+});
+
+test("store: deleteRun removes run-scoped data but keeps the project's scopes", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  db.upsertScopes(projectId, [{ scopeId: "s1", status: "audited" }, { scopeId: "s2", status: "pending" }]);
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/p-1" });
+  db.upsertFindings(projectId, runId, [{ findingKey: "f1", title: "x", status: "suspected" }]);
+  db.finishRun(runId, "done");
+
+  assert.equal(db.deleteRun(runId), true);
+  assert.equal(db.listRuns(projectId).length, 0);
+  assert.equal(db.countFindings(projectId), 0); // run-scoped findings gone
+  assert.equal(db.scopeProgress(projectId).total, 2); // project scopes kept
+  assert.equal(db.deleteRun(runId), false); // already gone
+  db.close();
+});
+
+test("store: setScopeStatus marks a scope deferred (skipped) and counts it", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  db.upsertScopes(projectId, [{ scopeId: "s1", status: "pending" }, { scopeId: "s2", status: "pending" }]);
+  assert.equal(db.setScopeStatus(projectId, "s1", "deferred"), 1);
+  assert.deepEqual(db.scopeProgress(projectId), { total: 2, audited: 0, pending: 1, deferred: 1 });
+  db.close();
+});
+
+test("store: daemon tokens + job queue (claim is FIFO and one-shot; cancel is observable)", async () => {
+  const db = await tempDb();
+  const { token } = db.createDaemonToken("local");
+  assert.ok(db.getDaemonByToken(token)); // valid token authenticates
+  assert.equal(db.getDaemonByToken("nope"), undefined); // unknown token rejected
+  const daemonId = Number(db.getDaemonByToken(token).id);
+
+  const j1 = db.enqueueJob("proj", { verb: "run" });
+  const j2 = db.enqueueJob("proj", { verb: "map" });
+  const claim1 = db.claimJob(daemonId);
+  assert.equal(claim1.id, j1); // FIFO
+  assert.deepEqual(claim1.spec, { verb: "run" });
+  assert.equal(db.getJob(j1).status, "dispatched");
+  assert.equal(db.claimJob(daemonId).id, j2);
+  assert.equal(db.claimJob(daemonId), undefined); // queue drained
+
+  db.requestJobCancel(j1);
+  assert.deepEqual(db.canceledJobIds(), [j1]); // a daemon polls this to abort
+  db.setJobStatus(j1, "killed");
+  assert.deepEqual(db.canceledJobIds(), []); // no longer running → not reported
+  db.close();
+});
+
+test("store: confirm decisions are replaced per run, not duplicated", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const runId = db.startRun({ projectId, kind: "confirm", runDir: "/runs/p-confirm-1" });
+  db.upsertConfirmDecisions(projectId, runId, [
+    { bug: "A", reproduced: "yes", recommendation: "submit-candidate" },
+    { bug: "B", reproduced: "no", recommendation: "drop" },
+  ], "/runs/p-confirm-1/confirm_report.md");
+  assert.equal(db.listConfirmDecisions(projectId).length, 2);
+  // a re-run of confirm rewrites the sheet wholesale
+  db.upsertConfirmDecisions(projectId, runId, [{ bug: "A", reproduced: "yes", recommendation: "submit-candidate" }]);
+  assert.equal(db.listConfirmDecisions(projectId).length, 1);
+  db.close();
+});

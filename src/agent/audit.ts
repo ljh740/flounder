@@ -14,6 +14,8 @@ import { runRefutation } from "./refutation.js";
 import { runAuditLoop } from "./loop.js";
 import { ProjectMemory } from "./memory.js";
 import { loadScopeInventory, saveScopeInventory, scopeProgress } from "./scope-store.js";
+import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
+import type { RunKind } from "../db/store.js";
 import { isPiSessionProvider, runAuditSession, SessionLlmClient } from "./pi-session.js";
 import type { TranscriptStep } from "./prompts.js";
 import { buildTools, clearScratchFindings, dedupeFindings, ingestFindingsFromScratch, newSession, readScratchScopes, type AgentFinding, type AgentSession, type AuditScope, type ToolContext } from "./tools.js";
@@ -33,7 +35,7 @@ export interface AuditRunResult {
 
 export async function runAudit(
   cfg: AuditorConfig,
-  options: { llm?: LlmClient; streamEvents?: boolean } = {},
+  options: { llm?: LlmClient; streamEvents?: boolean; kind?: RunKind; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory } = {},
 ): Promise<AuditRunResult> {
   const startedAt = new Date();
   const logger = new RunLogger(cfg.outputDir, cfg.targetName, startedAt, { streamEvents: options.streamEvents ?? false });
@@ -124,6 +126,8 @@ export async function runAudit(
         fileManifest,
         ...(scopeNote ? { scopeNote } : {}),
         ...(memoryHint ? { memoryHint } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.onActivity ? { onActivity: options.onActivity } : {}),
         ...flags,
       });
     }
@@ -149,6 +153,10 @@ export async function runAudit(
   let stoppedReason: string;
   let manualFindings = false;
   let scopeInventory: AuditScope[] = [];
+  // SQLite tracking: record the project + a running run, then update scope coverage,
+  // findings, and final status as the run progresses. Failure-isolated (never throws).
+  const recorder = (options.makeTracker ?? RunRecorder.start)(cfg, logger.runDir, options.kind ?? "run", logger);
+  if (recorder.runDbId !== undefined) options.onRun?.(recorder.runDbId); // let an in-process caller learn the DB run id
   // Set when concurrent digs already ran differential confirmation in their own
   // isolated workspaces, so the shared post-loop differential stage skips them.
   let digDifferentialDone = false;
@@ -192,6 +200,7 @@ export async function runAudit(
     await logger.artifact("audit_scopes.json", scopeInventory);
     await logger.event("audit_map_done", { scopes: scopeInventory.length });
     await logger.event("audit_scope_progress", { ...scopeProgress(scopeInventory), resumed: false });
+    recorder.scopes(scopeInventory);
     clearScratchFindings(session);
     session.findings = [];
     session.counters.finding = 0;
@@ -226,6 +235,7 @@ export async function runAudit(
     // resume then skips MAP. Each dig below also checkpoints scope status + partial
     // findings, so a killed run only redoes the one in-flight dig.
     await saveScopeInventory(inventoryDir, scopeInventory);
+    recorder.scopes(scopeInventory);
 
     const digCfg = withRole(cfg, "dig");
     let toDig: AuditScope[];
@@ -240,9 +250,10 @@ export async function runAudit(
       await logger.event("audit_scope_picked", { ids: toDig.map((scope) => scope.id) });
     } else {
       // Audit the highest-scored scopes not yet audited; the rest stay pending for
-      // a future run (visible, never silently dropped).
+      // a future run (visible, never silently dropped). A "deferred" scope is one the
+      // operator chose to skip, so auto-selection excludes it (an explicit --scope still digs it).
       toDig = scopeInventory
-        .filter((scope) => scope.status !== "audited")
+        .filter((scope) => scope.status !== "audited" && scope.status !== "deferred")
         .sort((a, b) => b.score - a.score)
         .slice(0, Math.max(1, cfg.auditMaxScopes));
     }
@@ -318,6 +329,7 @@ export async function runAudit(
         // Resume checkpoint: persist the audited status so a kill mid-run skips this scope
         // on the next run (concurrent digs' findings live in their isolated workspaces).
         await saveScopeInventory(inventoryDir, scopeInventory);
+        recorder.scopes(scopeInventory);
         return { findings: unioned, steps: digSteps, commandRuns: scopedRuns };
       };
       await logger.event("audit_dig_concurrent_start", { scopes: toDig.length, concurrency });
@@ -344,6 +356,7 @@ export async function runAudit(
         // so a kill mid-run resumes at the next pending scope and keeps completed work.
         await saveScopeInventory(inventoryDir, scopeInventory);
         await checkpointFindings();
+        recorder.scopes(scopeInventory);
       }
     }
     // Each scope/dig session numbered its findings independently (f1, f2, …), so
@@ -539,10 +552,17 @@ export async function runAudit(
     manifest: publicPath(projectHistoryManifestPath(historyLocation(cfg))),
   });
 
+  // SQLite tracking: final scope coverage, all findings (with their end-of-run status,
+  // recorded on the timeline), and the run marked done.
+  const finalCoverage = scopeInventory.length > 0 ? scopeProgress(scopeInventory) : undefined;
+  recorder.scopes(scopeInventory);
+  recorder.findings(session.findings, logger.runDir, "run finalize");
+  recorder.finish(options.signal?.aborted ? "killed" : "done", finalCoverage, confirmed.length);
+
   return {
     runDir: logger.runDir,
     summary,
-    ...(scopeInventory.length > 0 ? { scopeCoverage: scopeProgress(scopeInventory) } : {}),
+    ...(finalCoverage ? { scopeCoverage: finalCoverage } : {}),
   };
 }
 

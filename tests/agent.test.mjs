@@ -469,7 +469,7 @@ test("map → dig: --deep enumerates scopes then deep-audits each, tagging findi
     const s2 = scopes.find((s) => s.id === "S2");
     assert.equal(s1.status, "audited", "the highest-scored scope is audited");
     assert.equal(s2.status, "pending", "scopes beyond the cap stay pending (not dropped)");
-    assert.deepEqual(scopeCoverage, { total: 2, audited: 1, pending: 1 });
+    assert.deepEqual(scopeCoverage, { total: 2, audited: 1, pending: 1, deferred: 0 });
 
     // Dig produced the confirmed finding, tagged by the scope it came from.
     assert.equal(summary.findings.length, 1);
@@ -536,13 +536,13 @@ test("map → dig is resumable: a second run skips map and audits the next pendi
 
     // Run 1: map enumerates S1+S2, dig audits S1, S2 left pending.
     const run1 = await runAudit({ ...defaultConfig(), ...base }, { llm: new MockAuditLlmClient() });
-    assert.deepEqual(run1.scopeCoverage, { total: 2, audited: 1, pending: 1 });
+    assert.deepEqual(run1.scopeCoverage, { total: 2, audited: 1, pending: 1, deferred: 0 });
     const events1 = (await readFile(path.join(run1.runDir, "events.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(events1.some((e) => e.kind === "audit_map_done"), "run 1 enumerates the inventory");
 
     // Run 2: same target/out → resume. No new map; audits the next pending scope (S2).
     const run2 = await runAudit({ ...defaultConfig(), ...base }, { llm: new MockAuditLlmClient() });
-    assert.deepEqual(run2.scopeCoverage, { total: 2, audited: 2, pending: 0 }, "the second run completes coverage");
+    assert.deepEqual(run2.scopeCoverage, { total: 2, audited: 2, pending: 0, deferred: 0 }, "the second run completes coverage");
     const events2 = (await readFile(path.join(run2.runDir, "events.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(!events2.some((e) => e.kind === "audit_map_done"), "run 2 must not re-run the map phase");
     assert.ok(events2.some((e) => e.kind === "audit_map_resumed"), "run 2 resumes the persisted inventory");
