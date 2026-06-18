@@ -51,7 +51,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     let tracker: RemoteTracker | undefined;
     const sink = activitySink(() => tracker);
     const makeTracker = (cfg: AuditorConfig, runDir: string, kind: string): RunTracker => {
-      tracker = new RemoteTracker(base, headers, { project: cfg.targetName, kind, runDir, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, budgets: configSnapshot(cfg) });
+      tracker = new RemoteTracker(base, headers, { jobId: job.id, project: cfg.targetName, kind, runDir, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, budgets: configSnapshot(cfg) });
       return tracker;
     };
     try {
@@ -118,7 +118,7 @@ class RemoteTracker implements RunTracker {
   constructor(
     private readonly base: string,
     private readonly headers: Record<string, string>,
-    start: { project: string; kind: string; runDir: string; provider?: string; model?: string; thinking?: string; budgets: unknown },
+    start: { jobId: number; project: string; kind: string; runDir: string; provider?: string; model?: string; thinking?: string; budgets: unknown },
   ) {
     this.chain = this.req("POST", "/api/daemon/runs", start).then((r) => {
       this.runId = (r as { runId?: number } | null)?.runId;

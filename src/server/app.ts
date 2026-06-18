@@ -1,16 +1,21 @@
-// Local web app + REST API for tracking/driving audits across projects. Every workflow
-// resource (project, run, scope, finding, confirm decision) is a REST resource, and every
-// operation the UI performs is an API call — so an AI agent can drive the whole workflow
-// without the UI by fetching GET /api (a self-describing catalog of all endpoints) and
-// calling them. The UI is just one client of this API. Zero-dependency: Node's built-in
-// http + a vanilla SPA. Binds to localhost only (it can spawn audit processes).
+// Control-plane server + REST API for tracking/driving audits across projects. Every
+// workflow resource (project, run, scope, finding, confirm decision) is a REST resource,
+// and every operation the UI performs is an API call — so an AI agent can drive the whole
+// workflow without the UI by fetching GET /api (a self-describing catalog of all endpoints)
+// and calling them. The UI is just one client of this API.
+//
+// Execution is DECOUPLED: this server owns the SQLite DB and a job queue but never runs an
+// audit itself. One or more `fsa daemon` processes (possibly on other machines) connect,
+// claim queued jobs, run runAudit/runConfirm locally (code + provider keys stay on the
+// daemon), and report progress back over HTTP. Server→daemon nudges (poll/cancel) ride an
+// SSE stream; daemon→server updates are POSTs. Zero-dependency: Node's built-in http + a
+// vanilla SPA. Bind to localhost unless a per-daemon bearer token is configured.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync, createReadStream, statSync } from "node:fs";
-import path from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { MetadataStore, type RunKind, type ScopeStatus } from "../db/store.js";
-import { RunManager, type LaunchSpec, type ActivityBus } from "./run-manager.js";
+import { MetadataStore, type RunKind, type Coverage } from "../db/store.js";
+import { type LaunchSpec, ActivityBus } from "./run-manager.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { loadScopeInventory, saveScopeInventory } from "../agent/scope-store.js";
 
@@ -29,13 +34,61 @@ export interface UiServerOptions {
   host?: string;
 }
 
+// The control plane: the live registry of connected daemons (for server→daemon nudges) and
+// a per-run activity bus (fed by daemon activity POSTs, read by the UI's SSE log stream).
+// It holds NO execution state — the DB job queue is the system of record for dispatch.
+class ControlPlane {
+  private readonly daemons = new Set<ServerResponse>();
+  private readonly buses = new Map<number, ActivityBus>();
+
+  addDaemon(res: ServerResponse): void {
+    this.daemons.add(res);
+  }
+  removeDaemon(res: ServerResponse): void {
+    this.daemons.delete(res);
+  }
+  daemonCount(): number {
+    return this.daemons.size;
+  }
+
+  /** Nudge every connected daemon to (re)claim queued jobs. */
+  nudge(): void {
+    this.broadcast({ type: "poll" });
+  }
+  /** Ask whichever daemon holds this job to abort it (others ignore an unknown jobId). */
+  cancel(jobId: number): void {
+    this.broadcast({ type: "cancel", jobId });
+  }
+  private broadcast(ev: unknown): void {
+    const frame = `data: ${JSON.stringify(ev)}\n\n`;
+    for (const res of this.daemons) {
+      try {
+        res.write(frame);
+      } catch {
+        this.daemons.delete(res);
+      }
+    }
+  }
+
+  /** The activity bus for a run (created on first use); daemon activity POSTs push into it,
+   * the UI's GET /api/runs/:id/log streams out of it. */
+  bus(runId: number): ActivityBus {
+    let bus = this.buses.get(runId);
+    if (!bus) {
+      bus = new ActivityBus();
+      this.buses.set(runId, bus);
+    }
+    return bus;
+  }
+}
+
 interface Ctx {
   req: IncomingMessage;
   res: ServerResponse;
   params: Record<string, string>;
   url: URL;
   store: MetadataStore;
-  manager: RunManager;
+  plane: ControlPlane;
   out: string;
 }
 
@@ -74,7 +127,7 @@ const ROUTES: Route[] = [
   route({
     method: "GET", path: "/api/projects",
     summary: "List all projects with a live snapshot (scope coverage, finding counts, confirmed-bug count, latest run, active runs).",
-    handler: (c) => sendJson(c.res, 200, { projects: projectSnapshots(c.store, c.manager) }),
+    handler: (c) => sendJson(c.res, 200, { projects: projectSnapshots(c.store) }),
   }),
   route({
     method: "POST", path: "/api/projects",
@@ -110,7 +163,7 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "POST", path: "/api/projects/:name/runs",
-    summary: "Launch a run on the project (start/continue an audit, restart, map, audit a region/scope, or confirm). Uses the project's stored materials + config unless overridden. This is the single action behind the UI's Start/Continue/Restart/Run buttons.",
+    summary: "Queue a run on the project (start/continue an audit, restart, map, audit a region/scope, or confirm). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's Start/Continue/Restart/Run buttons.",
     params: { name: "project name" },
     body: {
       verb: "'run' | 'map' | 'audit' | 'confirm' (default 'run'; run = map→dig, resumes)",
@@ -151,18 +204,16 @@ const ROUTES: Route[] = [
 
   route({
     method: "GET", path: "/api/runs/:id",
-    summary: "A single run (status, kind, coverage, finding count, run dir, timestamps). Includes the rich library `result` (AuditRunResult / ConfirmRunResult — full findings, summary, coverage) for a run launched in the current server session.",
+    summary: "A single run (status, kind, coverage, finding count, run dir, timestamps).",
     params: { id: "run id" },
     handler: (c) => {
       const run = c.store.getRun(Number(c.params.id));
-      if (!run) return sendJson(c.res, 404, { error: "no such run" });
-      const result = c.manager.resultFor(Number(c.params.id));
-      sendJson(c.res, 200, { run, ...(result ? { result } : {}) });
+      run ? sendJson(c.res, 200, { run }) : sendJson(c.res, 404, { error: "no such run" });
     },
   }),
   route({
     method: "POST", path: "/api/runs/:id/stop",
-    summary: "Stop a running run (aborts the in-process session). The run is reconciled to 'killed'.",
+    summary: "Stop a running run: flags its job for cancel and nudges the executing daemon to abort. The run is reconciled to 'killed'.",
     params: { id: "run id" },
     handler: runStop,
   }),
@@ -174,19 +225,28 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "GET", path: "/api/runs/:id/log",
-    summary: "SSE stream of a run's live activity, tailed from its event log: the model's thinking + output blocks (audit_thinking / audit_text), tool calls (audit_step), and milestones. Streams existing entries then new ones as they happen.",
+    summary: "SSE stream of a run's live activity: the model's token-level thinking + output (audit_thinking / audit_text), tool calls (audit_step), and milestones, as reported by the executing daemon. Replays recent backlog then streams new events.",
     params: { id: "run id" },
-    handler: runLog,
+    handler: (c) => streamFromBus(c.res, c.plane.bus(Number(c.params.id))),
   }),
 
-  route({ method: "GET", path: "/api/active", summary: "Currently-running processes the run-manager is supervising.", handler: (c) => sendJson(c.res, 200, { active: c.manager.active() }) }),
-  route({ method: "GET", path: "/api/stream", summary: "Server-sent events: the project snapshot + active list, pushed ~1/s for live updates.", handler: (c) => streamSnapshots(c.res, c.store, c.manager) }),
+  route({ method: "GET", path: "/api/active", summary: "In-flight jobs (queued/dispatched/running) across all daemons.", handler: (c) => sendJson(c.res, 200, { active: activeRuns(c.store), daemons: c.store.listDaemons() }) }),
+  route({ method: "GET", path: "/api/stream", summary: "Server-sent events: the project snapshot + active list, pushed ~1/s for live updates.", handler: (c) => streamSnapshots(c.res, c.store) }),
+
+  // ---- execution plane: daemon ↔ server (hidden from the agent catalog) ----------------
+  route({ method: "POST", path: "/api/daemon/register", summary: "(daemon) Register/heartbeat. Bearer token required.", hidden: true, handler: daemonRegister }),
+  route({ method: "GET", path: "/api/daemon/stream", summary: "(daemon) SSE: poll/cancel nudges from the server.", hidden: true, handler: daemonStream }),
+  route({ method: "POST", path: "/api/daemon/claim", summary: "(daemon) Atomically claim the oldest queued job.", hidden: true, handler: daemonClaim }),
+  route({ method: "POST", path: "/api/daemon/runs", summary: "(daemon) Start a run row for a claimed job; links job→run.", hidden: true, handler: daemonRunStart }),
+  route({ method: "PATCH", path: "/api/daemon/runs/:id", summary: "(daemon) Report run progress: scopes / findings / confirm-decisions / finish.", hidden: true, handler: daemonRunUpdate }),
+  route({ method: "POST", path: "/api/daemon/runs/:id/activity", summary: "(daemon) Push a batch of token-level activity events for the live log.", hidden: true, handler: daemonRunActivity }),
+  route({ method: "POST", path: "/api/daemon/jobs/:id/status", summary: "(daemon) Report a job's terminal status (done/error/canceled).", hidden: true, handler: daemonJobStatus }),
 ];
 
 function catalog(): unknown {
   return {
     name: "full-stack-auditor",
-    description: "REST API for tracking and driving white-hat audits. Resources: project (CRUD), run (launch/stop/read), scope, finding, confirm-decision. Every UI operation is one of these calls.",
+    description: "REST API for tracking and driving white-hat audits. Resources: project (CRUD), run (launch/stop/read), scope, finding, confirm-decision. Runs execute on connected daemons; every UI operation is one of these calls.",
     resources: ["project", "run", "scope", "finding", "confirm-decision"],
     endpoints: ROUTES.filter((r) => !r.hidden).map((r) => ({
       method: r.method,
@@ -202,12 +262,12 @@ function catalog(): unknown {
 export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof createServer> {
   const out = options.out ?? "runs";
   const port = options.port ?? 4500;
-  const host = options.host ?? "127.0.0.1"; // localhost only — this endpoint can spawn processes
+  const host = options.host ?? "127.0.0.1"; // localhost by default; expose only with daemon tokens set
   const store = MetadataStore.openForOutput(out);
-  // Runs execute in this process, so any row left `running` is orphaned by a prior restart.
-  const orphans = store.reconcileOrphanedRuns();
-  if (orphans > 0) console.log(`[fsa ui] reconciled ${orphans} interrupted run(s) from a previous session`);
-  const manager = new RunManager(store, out); // runs the library in-process (not the CLI)
+  const plane = new ControlPlane();
+  // NOTE: we do NOT reconcile `running` rows on startup — runs execute on daemons, which
+  // survive a server restart. Blind-killing them here would be wrong. (A future daemon
+  // heartbeat can reconcile rows whose daemon has gone stale.)
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -218,9 +278,14 @@ export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof 
       if (!match) continue;
       const params: Record<string, string> = {};
       r.paramNames.forEach((name, i) => (params[name] = decodeURIComponent(match[i + 1] ?? "")));
-      Promise.resolve(r.handler({ req, res, params, url, store, manager, out })).catch((error) =>
-        sendJson(res, 500, { error: String(error instanceof Error ? error.message : error) }),
-      );
+      // .then(run) (not Promise.resolve(run())) so a SYNCHRONOUS throw in a handler becomes a
+      // rejection we can turn into a 500 — never an uncaught exception that kills the server.
+      Promise.resolve()
+        .then(() => r.handler({ req, res, params, url, store, plane, out }))
+        .catch((error) => {
+          if (!res.headersSent) sendJson(res, 500, { error: String(error instanceof Error ? error.message : error) });
+          else res.end();
+        });
       return;
     }
     sendJson(res, 404, { error: "not found", hint: "GET /api lists every endpoint" });
@@ -289,23 +354,30 @@ async function scopeSetStatus(c: Ctx): Promise<void> {
   }
   const scopeId = c.params.scopeId ?? "";
   // Update the persisted inventory the AUDIT reads (history-dir scopes.json), so the next
-  // dig honors the skip — then mirror it into the UI's SQLite projection.
+  // dig honors the skip — then mirror it into the UI's SQLite projection. (If the daemon
+  // executes from its own checkout, it re-reads the inventory there via resume/--remap; this
+  // server-side copy is the one a co-located daemon shares.)
   const inventoryDir = projectHistoryDir({ outputDir: c.out, targetName: String(project.name) });
   const inventory = await loadScopeInventory(inventoryDir);
   const scope = inventory.find((s) => s.id === scopeId);
-  if (!scope) return sendJson(c.res, 404, { error: `no scope "${scopeId}" in the inventory` });
-  scope.status = status;
-  await saveScopeInventory(inventoryDir, inventory);
+  if (scope) {
+    scope.status = status;
+    await saveScopeInventory(inventoryDir, inventory);
+  }
   c.store.setScopeStatus(Number(project.id), scopeId, status);
   sendJson(c.res, 200, { ok: true, scopeId, status });
 }
 
+// Queue a run for the project. The job lands in the DB queue; connected daemons are nudged
+// to claim it. Returns the job id (the run id appears once a daemon starts it).
 async function runLaunch(c: Ctx): Promise<void> {
   const project = c.store.getProject(c.params.name ?? "");
   if (!project) return sendJson(c.res, 404, { error: `no project named ${c.params.name}` });
   const body = (await readBody(c.req)) as Record<string, unknown>;
-  const result = c.manager.launch(launchSpec(project, body, c.out));
-  sendJson(c.res, 200, result);
+  const spec = launchSpec(project, body, c.out);
+  const jobId = c.store.enqueueJob(spec.target, spec);
+  c.plane.nudge();
+  sendJson(c.res, 200, { jobId, verb: spec.verb, queued: true, daemons: c.plane.daemonCount() });
 }
 
 function findingsList(c: Ctx): void {
@@ -331,78 +403,167 @@ function confirmDecisionsList(c: Ctx): void {
 function runStop(c: Ctx): void {
   const id = Number(c.params.id);
   if (!c.store.getRun(id)) return sendJson(c.res, 404, { error: "no such run" });
-  sendJson(c.res, 200, { stopped: c.manager.stop(id) });
-}
-
-function runLog(c: Ctx): void {
-  const id = Number(c.params.id);
-  const run = c.store.getRun(id);
-  if (!run) return sendJson(c.res, 404, { error: "no such run" });
-  // A run launched this session streams token-level activity from the in-memory bus; any
-  // other run (e.g. historical, or after a restart) tails its persisted event log.
-  const bus = c.manager.activityFor(id);
-  if (bus) {
-    streamFromBus(c.res, bus);
-    return;
+  const job = c.store.getJobByRun(id);
+  if (job) {
+    c.store.requestJobCancel(Number(job.id));
+    c.plane.cancel(Number(job.id)); // nudge the executing daemon to abort
   }
-  if (typeof run.run_dir === "string") {
-    streamRunLog(c.res, run.run_dir);
-    return;
-  }
-  sendJson(c.res, 404, { error: "run has no activity or event log" });
+  sendJson(c.res, 200, { stopped: Boolean(job) });
 }
 
 function streamFromBus(res: ServerResponse, bus: ActivityBus): void {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-  const unsubscribe = bus.subscribe((ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`));
-  res.on("close", unsubscribe);
+  res.write(": open\n\n"); // flush headers immediately so the client's EventSource opens even before the first event
+  // `let` + no-op default: subscribe() replays backlog synchronously, so the callback can fire
+  // before the real unsubscribe is assigned — guard against the temporal-dead-zone reference.
+  let unsubscribe = (): void => {};
+  unsubscribe = bus.subscribe((ev) => {
+    try {
+      res.write(`data: ${JSON.stringify(ev)}\n\n`);
+    } catch {
+      unsubscribe();
+    }
+  });
+  res.on("close", () => unsubscribe());
 }
 
-// Tail a run's events.jsonl over SSE: send existing lines, then poll for appended bytes and
-// stream new ones. The run process (separate from this server) appends the model's thinking/
-// output blocks + tool calls there, so this is the live-activity channel for the UI.
-function streamRunLog(res: ServerResponse, runDir: string): void {
-  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-  const file = path.join(runDir, "events.jsonl");
-  let offset = 0;
-  let buf = "";
-  const pump = (): void => {
-    let size: number;
+// ---- daemon (execution-plane) handlers -----------------------------------------------
+
+// Authenticate a daemon by its bearer token. On failure, sends 401 and returns null.
+function daemonAuth(c: Ctx): Record<string, unknown> | null {
+  const header = c.req.headers["authorization"];
+  const token = typeof header === "string" && header.startsWith("Bearer ") ? header.slice(7) : "";
+  const daemon = token ? c.store.getDaemonByToken(token) : undefined;
+  if (!daemon) {
+    sendJson(c.res, 401, { error: "unauthorized: a valid daemon bearer token is required" });
+    return null;
+  }
+  return daemon;
+}
+
+async function daemonRegister(c: Ctx): Promise<void> {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  const body = (await readBody(c.req)) as { name?: string; capabilities?: unknown };
+  c.store.touchDaemon(Number(daemon.id), body.capabilities);
+  sendJson(c.res, 200, { ok: true, daemonId: Number(daemon.id), name: daemon.name });
+}
+
+function daemonStream(c: Ctx): void {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  c.store.touchDaemon(Number(daemon.id));
+  c.res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  c.plane.addDaemon(c.res);
+  c.res.write(`data: ${JSON.stringify({ type: "poll" })}\n\n`); // drain any backlog on connect
+  const keepalive = setInterval(() => {
     try {
-      size = statSync(file).size;
+      c.res.write(`: keepalive\n\n`);
     } catch {
-      return; // not created yet
+      /* closed */
     }
-    if (size < offset) {
-      offset = 0;
-      buf = "";
-    }
-    if (size <= offset) return;
-    const start = offset;
-    offset = size;
-    const stream = createReadStream(file, { start, end: size - 1, encoding: "utf8" });
-    let chunk = "";
-    stream.on("data", (d) => {
-      chunk += d;
-    });
-    stream.on("end", () => {
-      buf += chunk;
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) if (line.trim()) res.write(`data: ${line}\n\n`);
-    });
-    stream.on("error", () => {});
+  }, 25_000);
+  c.res.on("close", () => {
+    clearInterval(keepalive);
+    c.plane.removeDaemon(c.res);
+  });
+}
+
+function daemonClaim(c: Ctx): void {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  const job = c.store.claimJob(Number(daemon.id));
+  sendJson(c.res, 200, job ? { job } : {});
+}
+
+async function daemonRunStart(c: Ctx): Promise<void> {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  const body = (await readBody(c.req)) as { jobId?: number; project?: string; kind?: RunKind; runDir?: string; provider?: string; model?: string; thinking?: string; budgets?: unknown };
+  const name = (body.project ?? "").trim();
+  if (!name || !body.runDir) return sendJson(c.res, 400, { error: "project and runDir are required" });
+  const existing = c.store.getProject(name);
+  const projectId = existing ? Number(existing.id) : c.store.upsertProject({ name, config: body.budgets });
+  const runId = c.store.startRun({
+    projectId,
+    kind: body.kind ?? "run",
+    runDir: body.runDir,
+    provider: body.provider,
+    model: body.model,
+    thinking: body.thinking,
+    budgets: body.budgets,
+  });
+  if (typeof body.jobId === "number") c.store.setJobRun(body.jobId, runId); // link job → run (so stop can find it)
+  sendJson(c.res, 200, { runId });
+}
+
+async function daemonRunUpdate(c: Ctx): Promise<void> {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  const runId = Number(c.params.id);
+  const run = c.store.getRun(runId);
+  if (!run) return sendJson(c.res, 404, { error: "no such run" });
+  const projectId = Number(run.project_id);
+  const body = (await readBody(c.req)) as {
+    scopes?: Parameters<MetadataStore["upsertScopes"]>[1];
+    findings?: Parameters<MetadataStore["upsertFindings"]>[2];
+    reason?: string;
+    confirmDecisions?: Parameters<MetadataStore["upsertConfirmDecisions"]>[2];
+    decisionPath?: string;
+    finish?: { status: Parameters<MetadataStore["finishRun"]>[1]; coverage?: Coverage; findingsTotal?: number };
   };
-  pump();
-  const timer = setInterval(pump, 700);
-  res.on("close", () => clearInterval(timer));
+  if (body.scopes) {
+    c.store.upsertScopes(projectId, body.scopes);
+    c.store.updateRunCoverage(runId, c.store.scopeProgress(projectId));
+  }
+  if (body.findings) c.store.upsertFindings(projectId, runId, body.findings, body.reason);
+  if (body.confirmDecisions) c.store.upsertConfirmDecisions(projectId, runId, body.confirmDecisions, body.decisionPath);
+  if (body.finish) c.store.finishRun(runId, body.finish.status, body.finish.coverage, body.finish.findingsTotal);
+  sendJson(c.res, 200, { ok: true });
+}
+
+async function daemonRunActivity(c: Ctx): Promise<void> {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  const runId = Number(c.params.id);
+  const body = (await readBody(c.req)) as { events?: Array<{ kind: string; delta?: string; tool?: string; step?: number }> };
+  const bus = c.plane.bus(runId);
+  for (const ev of body.events ?? []) bus.push(ev);
+  sendJson(c.res, 200, { ok: true });
+}
+
+async function daemonJobStatus(c: Ctx): Promise<void> {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  const jobId = Number(c.params.id);
+  const body = (await readBody(c.req)) as { status?: string; error?: string };
+  const status = body.status ?? "done";
+  c.store.setJobStatus(jobId, status, body.error);
+  // If the daemon died/aborted before its run reached a terminal state, reconcile the run.
+  if (status === "error" || status === "canceled") {
+    const job = c.store.getJob(jobId);
+    const runId = job && typeof job.run_id === "number" ? job.run_id : undefined;
+    if (runId !== undefined) {
+      const run = c.store.getRun(runId);
+      if (run && run.status === "running") c.store.finishRun(runId, status === "canceled" ? "killed" : "error");
+    }
+  }
+  sendJson(c.res, 200, { ok: true });
 }
 
 // ---- shared -----------------------------------------------------------------
 
-function projectSnapshots(store: MetadataStore, manager: RunManager): Array<Record<string, unknown>> {
+// In-flight jobs across all daemons, shaped for the dashboard's "active" list.
+function activeRuns(store: MetadataStore): Array<Record<string, unknown>> {
+  return store.runningJobs().map((job) => {
+    const spec = safeParse(job.spec_json) as { verb?: string } | null;
+    return { jobId: job.id, runId: job.run_id ?? null, target: job.project, status: job.status, verb: spec?.verb ?? "run", startedAt: job.created_at };
+  });
+}
+
+function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> {
   const activeByTarget = new Map<string, number>();
-  for (const run of manager.active()) activeByTarget.set(run.target, (activeByTarget.get(run.target) ?? 0) + 1);
+  for (const job of store.runningJobs()) activeByTarget.set(String(job.project), (activeByTarget.get(String(job.project)) ?? 0) + 1);
   return store.listProjects().map((project) => {
     const id = Number(project.id);
     return {
@@ -419,14 +580,19 @@ function projectSnapshots(store: MetadataStore, manager: RunManager): Array<Reco
   });
 }
 
-function streamSnapshots(res: ServerResponse, store: MetadataStore, manager: RunManager): void {
+function streamSnapshots(res: ServerResponse, store: MetadataStore): void {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-  const tick = (): void => {
-    res.write(`data: ${JSON.stringify({ projects: projectSnapshots(store, manager), active: manager.active() })}\n\n`);
-  };
-  tick();
   const timer = setInterval(tick, 1200);
   res.on("close", () => clearInterval(timer));
+  tick();
+  // A throw here (closed socket, or a transient store read error) must not crash the server.
+  function tick(): void {
+    try {
+      res.write(`data: ${JSON.stringify({ projects: projectSnapshots(store), active: activeRuns(store) })}\n\n`);
+    } catch {
+      clearInterval(timer);
+    }
+  }
 }
 
 // Build a launch spec from the project's stored materials/config + the request body

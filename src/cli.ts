@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { defaultConfig, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
 import { runAudit } from "./agent/audit.js";
 import { runConfirm } from "./agent/confirm.js";
@@ -7,6 +9,7 @@ import { MockAuditLlmClient } from "./llm/mock.js";
 import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/history.js";
 import { MetadataStore } from "./db/store.js";
 import { startUiServer } from "./server/app.js";
+import { runDaemon } from "./server/daemon.js";
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
@@ -26,13 +29,36 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (cmd === "ui") {
-    // Local web app: track/drive audits across projects. Keeps running (the server holds
-    // the event loop open) until interrupted. Binds to localhost only.
-    const port = readIntFlag(rest, "--port");
+    // Control-plane web app: track/drive audits across projects. Keeps running (the server
+    // holds the event loop open) until interrupted. Runs execute on a DAEMON, not here — so
+    // by default we also spawn a co-located local daemon (mint a token + `fsa daemon`). Pass
+    // --no-daemon to run the control plane alone and connect your own daemon(s) elsewhere.
+    const port = readIntFlag(rest, "--port") ?? 4500;
+    const host = readFlag(rest, "--host") ?? "127.0.0.1";
     const out = readFlag(rest, "--out") ?? "runs";
-    startUiServer({ out, ...(port !== undefined ? { port } : {}) });
+    const server = startUiServer({ out, port, host });
+    if (rest.includes("--no-daemon")) {
+      console.log("[fsa ui] --no-daemon: no executor started. Connect one with `fsa daemon --server <url> --token <token>`.");
+    } else {
+      const concurrency = readIntFlag(rest, "--concurrency");
+      server.on("listening", () => spawnLocalDaemon({ out, url: `http://${host}:${port}`, ...(concurrency !== undefined ? { concurrency } : {}) }));
+    }
     await new Promise(() => {}); // run until the process is interrupted
     return;
+  }
+
+  if (cmd === "daemon") {
+    // Execution plane: connect to a control-plane server, claim queued jobs, and run them
+    // LOCALLY (code + provider keys stay here). May run on a different machine than the
+    // server. Reports progress back over HTTP; never touches the server's DB directly.
+    const server = readFlag(rest, "--server");
+    const token = readFlag(rest, "--token");
+    if (!server || !token) throw new Error("fsa daemon needs --server <url> and --token <token> (mint one with `fsa ui`, or via the store)");
+    const out = readFlag(rest, "--out") ?? "runs";
+    const name = readFlag(rest, "--name");
+    const concurrency = readIntFlag(rest, "--concurrency");
+    await runDaemon({ server, token, out, ...(name ? { name } : {}), ...(concurrency !== undefined ? { concurrency } : {}) });
+    return; // runDaemon loops forever (until interrupted)
   }
 
   // The three sealed agentic verbs share one driver (runAudit); the verb selects the
@@ -225,6 +251,32 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof raw.dryRun === "boolean") cfg.dryRun = raw.dryRun;
 }
 
+// Spawn a co-located daemon for `fsa ui`: mint a fresh bearer token in the shared store,
+// then run `fsa daemon` as a child pointed at the just-started server. The child dies with
+// the parent. (A remote daemon is started the same way, by hand, on another machine.)
+function spawnLocalDaemon(opts: { out: string; url: string; concurrency?: number }): void {
+  const store = MetadataStore.openForOutput(opts.out);
+  const { token } = store.createDaemonToken(`local-${process.pid}`);
+  store.close();
+  const args = [fileURLToPath(import.meta.url), "daemon", "--server", opts.url, "--token", token, "--out", opts.out];
+  if (opts.concurrency !== undefined) args.push("--concurrency", String(opts.concurrency));
+  const child = spawn(process.execPath, args, { stdio: "inherit" });
+  child.on("error", (error) => console.error(`[fsa ui] could not start local daemon: ${error.message}`));
+  child.on("exit", (code) => console.log(`[fsa ui] local daemon exited (code ${code ?? "?"})`));
+  const kill = (): void => {
+    try {
+      child.kill();
+    } catch {
+      /* already gone */
+    }
+  };
+  process.on("exit", kill);
+  process.on("SIGINT", () => {
+    kill();
+    process.exit(0);
+  });
+}
+
 function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
 }
@@ -305,6 +357,25 @@ function runDbCommand(args: string[]): void {
       }
       return;
     }
+    if (subcommand === "daemons") {
+      const daemons = db.listDaemons();
+      if (daemons.length === 0) {
+        console.log("(no daemons registered — mint a token with `fsa db mint-token [name]`, then run `fsa daemon`)");
+        return;
+      }
+      for (const d of daemons) console.log(`• [${d.id}] ${d.name}  last_seen=${d.last_seen_at ?? "never"}`);
+      return;
+    }
+    if (subcommand === "mint-token") {
+      // Mint a bearer token for a (remote) daemon. Must run on the SERVER machine — the
+      // server owns this DB; the daemon authenticates with the printed token over HTTP.
+      const name = readFlag(args, "--name") ?? positional ?? "daemon";
+      const { id, token } = db.createDaemonToken(name);
+      console.log(`[daemon ${id}] ${name}`);
+      console.log(`token: ${token}`);
+      console.log(`run on the executor machine:\n  fsa daemon --server http://<this-server-host>:4500 --token ${token}`);
+      return;
+    }
     const projectId = resolveProjectId(db, target);
     if (subcommand === "runs") {
       for (const run of db.listRuns(projectId)) {
@@ -319,7 +390,7 @@ function runDbCommand(args: string[]): void {
       }
       return;
     }
-    throw new Error(`Unknown db command "${subcommand}". Use: fsa db projects | runs [--target <name>] | findings --target <name>`);
+    throw new Error(`Unknown db command "${subcommand}". Use: fsa db projects | runs [--target <name>] | findings --target <name> | daemons | mint-token [name]`);
   } finally {
     db.close();
   }
@@ -363,8 +434,16 @@ Usage:
   fsa audit   [<region> | --scope <id,...> | --verify <file>] --source ...   deep-audit a region, inventory scopes, or given claims
   fsa confirm <run-dir> --source <paths...>                                  open-world: reproduce a run's findings on the real target
   fsa history import-run --target <name> --run <dir>
-  fsa db      [projects | runs [<target>] | findings <target>]               read the SQLite tracking store (projects, runs, coverage, findings)
-  fsa ui      [--port <n>] [--out <dir>]                                      local web dashboard: track/drive audits across projects (localhost only)
+  fsa db      [projects | runs [<target>] | findings <target> | daemons | mint-token [name]]   read the tracking store; mint/list daemon tokens
+  fsa ui      [--port <n>] [--host <h>] [--out <dir>] [--no-daemon]           control-plane web dashboard + a co-located executor daemon (localhost)
+  fsa daemon  --server <url> --token <token> [--out <dir>] [--concurrency <n>]   execution plane: claim + run queued jobs (may be a different machine)
+
+Control plane vs execution plane:
+  fsa ui starts the CONTROL PLANE (the dashboard, REST API, SQLite store, and job queue) and,
+  unless --no-daemon, a co-located DAEMON to execute jobs. The daemon is what actually runs the
+  audit — so code and provider keys stay on the daemon's machine. Run "fsa daemon" on another
+  host (with a token minted by the server operator) to execute remotely; the server owns the DB
+  and the daemon only reports progress back over HTTP.
 
 Sealed vs open world:
   run / map / audit are NETWORK-SEALED — the model finds and proves bugs blind, with no

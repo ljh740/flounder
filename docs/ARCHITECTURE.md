@@ -14,7 +14,7 @@ The main layers are:
 - Provider adapters: `src/llm/pi-ai.ts`, with explicit local CLI fallbacks in `src/llm/codex-cli.ts` and `src/llm/claude-code.ts`.
 - Pi integration: `src/pi/extension.ts` registers the `fsa_run` and `fsa_confirm` tools and the shell guardrail.
 - Tracking store: `src/db/store.ts` records every run's metadata to SQLite (see [Tracking, API, and UI](#tracking-api-and-ui)).
-- Server / UI: `src/server/` (run-manager + localhost REST API + web dashboard).
+- Server / UI: `src/server/` (control-plane REST API `app.ts` + execution-plane `daemon.ts` + web dashboard).
 
 ## Audit Flow
 
@@ -188,23 +188,22 @@ A second surface tracks and drives audits across projects. It is additive: the a
 
 ```mermaid
 flowchart LR
-  UI["Web dashboard (SPA)"] -->|HTTP / SSE| SRV["server (src/server/app.ts)"]
+  UI["Web dashboard (SPA)"] -->|HTTP / SSE| SRV["control plane — src/server/app.ts<br/>REST API + SQLite + job queue"]
   AGENT["AI agent"] -->|REST + GET /api catalog| SRV
-  SRV --> MGR["run-manager (src/server/run-manager.ts)"]
-  MGR -->|in-process| LIB["runAudit / runConfirm"]
-  LIB -->|RunRecorder| DB[("SQLite (src/db) — fsa.db")]
-  LIB --> FILES["run dir: events.jsonl, audit_findings.json, reports"]
-  SRV -->|read| DB
-  SRV -->|tail events.jsonl| FILES
+  SRV --- DB[("fsa.db (src/db)")]
+  SRV <-->|"SSE (poll/cancel) · HTTP (claim, progress, activity)"| DAE["execution plane — src/server/daemon.ts"]
+  DAE -->|in-process| LIB["runAudit / runConfirm"]
+  LIB -->|"RemoteTracker → HTTP"| SRV
+  LIB --> FILES["run dir on the daemon: events.jsonl, findings, reports"]
 ```
 
-**Tracking store (`src/db/store.ts`, `record.ts`).** SQLite via `node:sqlite` (no dependency added) at `<out>/fsa.db`, WAL + busy-timeout so a reader (the server) and writers (runs) coexist. It is the **system of record for run tracking**, written live — not a rebuildable projection: projects, the run lifecycle, scope coverage (mapped vs audited, per-dig), findings and their status transitions (suspect→confirm→refute, on a `finding_status_event` timeline), and confirm decisions. It stores metadata + **paths** to the on-disk artifacts, not their content. `RunRecorder` (`src/db/record.ts`) is the failure-isolated bridge from the kernel's in-memory types to store rows — it never throws into a run. Findings map the kernel `confirmationStatus`, with a skeptic-disputed finding surfaced as `refuted`.
+**Tracking store (`src/db/store.ts`, `record.ts`).** SQLite via `node:sqlite` (no dependency added) at `<out>/fsa.db`, WAL + busy-timeout so readers (the server) and writers coexist. It is the **system of record for run tracking**, written live — not a rebuildable projection: projects, the run lifecycle, scope coverage (mapped vs audited vs deferred, per-dig), findings and their status transitions (suspect→confirm→refute, on a `finding_status_event` timeline), and confirm decisions — plus a `daemon` registry (bearer tokens) and a `job` queue that is the control plane's dispatch record. It stores metadata + **paths** to the on-disk artifacts, not their content. Findings map the kernel `confirmationStatus`, with a skeptic-disputed finding surfaced as `refuted`.
 
-**Run-manager (`src/server/run-manager.ts`).** Launches audits **in-process via the library** (`runAudit`/`runConfirm`) rather than spawning the CLI — the CLI is a thin wrapper over the same functions, so calling them directly yields the rich `AuditRunResult`/`ConfirmRunResult` and finer hooks: `specToConfig(spec)` is the in-process equivalent of `parseConfig` + `applyAuditPosture` (posture per verb, unbounded budgets by default, remap/quick/region/scope/mock); `options.signal` (an `AbortSignal`) makes "stop" cooperative (→ `session.abort()`, the run finalizes as `killed`); `options.onRun` reports the DB run id. The audit's heavy work (builds, tests) still runs in sandboxed subprocesses spawned by the `bash` tool. Because runs are in-process, a server restart ends them — startup reconciles any still-`running` row to `killed`.
+**Control plane vs. execution plane.** Execution is **decoupled**. The server (control plane) owns the DB and the job queue but never runs an audit. One or more `fsa daemon` processes (the execution plane, possibly on **other machines**) claim queued jobs and run `runAudit`/`runConfirm` locally — so the target **code and provider keys stay on the daemon**, never the server. The seam is `RunTracker`: `runAudit`/`runConfirm` accept `options.makeTracker`; the default `RunRecorder` (`src/db/record.ts`) writes the local SQLite store (the CLI path), while the daemon injects a `RemoteTracker` that **POSTs progress to the server** over HTTP instead of touching the DB. `specToConfig(spec)` (`src/server/run-manager.ts`) maps a launch spec to an `AuditorConfig` (the equivalent of `parseConfig` + `applyAuditPosture`: posture per verb, unbounded budgets by default, remap/quick/region/scope/mock). Stop is cooperative: `POST /api/runs/:id/stop` flags the job for cancel and pushes an SSE nudge; the daemon aborts (`options.signal` → `session.abort()`, finalize → `killed`). `fsa ui` auto-spawns a co-located daemon (it mints a token and runs `fsa daemon`) unless `--no-daemon`; a remote daemon authenticates with a token from `fsa db mint-token`. Because runs live on the daemon, they **survive a server restart** — the server does not blind-kill `running` rows.
 
-**REST API + self-describing catalog (`src/server/app.ts`).** A localhost-only `node:http` server (it executes audits and reads local code, so it never binds beyond `127.0.0.1`). Every workflow operation is a REST resource so an AI agent can drive the whole flow without the UI: **project** (CRUD), **run** (`POST /api/projects/:name/runs` to launch, `GET /api/runs/:id` incl. the rich library result, `POST /api/runs/:id/stop`), and read-only **scope** / **finding** (paginated + filterable) / **confirm-decision**. `GET /api` returns a catalog of every endpoint (method, path, params, body, summary) — an agent fetches it once to learn the surface. Routing is a data-driven table, so the catalog and the handlers cannot drift.
+**REST API + self-describing catalog (`src/server/app.ts`).** A `node:http` server that binds to `127.0.0.1` by default. Every workflow operation is a REST resource so an AI agent can drive the whole flow without the UI: **project** (CRUD), **run** (`POST /api/projects/:name/runs` **enqueues a job** and returns its `jobId`; `GET /api/runs/:id`; `POST /api/runs/:id/stop`), and read-only **scope** / **finding** (paginated + filterable) / **confirm-decision**. `GET /api` returns a catalog of every endpoint (method, path, params, body, summary) — an agent fetches it once to learn the surface. The execution-plane protocol — `/api/daemon/*` (register, SSE stream, claim, run-start, progress PATCH, activity, job-status), each **bearer-token-authenticated** — is **hidden from the catalog** (it is machine-to-machine, not agent-facing). Routing is a data-driven table, so the catalog and the handlers cannot drift.
 
-**Live streams.** `GET /api/stream` (SSE) pushes the project snapshot ~1/s (computed from aggregate queries, so it stays cheap with many findings). `GET /api/runs/:id/log` (SSE) streams a run's live activity: for a run launched in this server session it streams the model's **thinking/output tokens** directly from the in-process session (via an `onActivity` hook → an in-memory bus); for any other run it tails the persisted `events.jsonl` (block-level history).
+**Live streams.** `GET /api/stream` (SSE) pushes the project snapshot ~1/s (computed from aggregate queries, so it stays cheap with many findings). `GET /api/runs/:id/log` (SSE) streams a run's live **token-level** activity (thinking/output deltas + tool calls) from a per-run in-memory bus that the daemon feeds via batched activity POSTs — so the live stream works even when execution is on another machine.
 
 **UI (`src/server/public/index.html`).** A zero-dependency vanilla SPA styled to GitHub's Primer (light default + dark toggle). It is **one client of the API above** — it can be ignored entirely in favor of the API. Per-project dashboard: scope coverage, findings + status timeline, the bugs actually **confirmed** on the real target (front and center), an "Edit config" form, a live-activity panel (the model's thinking), and Start/Continue/Restart/Run/Stop/Delete — each a single API call.
 

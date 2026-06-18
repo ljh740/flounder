@@ -482,13 +482,21 @@ function projectFields(d) {
   return { cfg, sourcePaths: arr(d.project.source_paths), buildRoot: d.project.build_root || "", corpusPaths: arr(d.project.corpus_paths) };
 }
 
+// Queue a run on the selected project. Runs execute on a connected DAEMON; if none is
+// connected the job just sits queued — surface that so the user isn't left wondering.
+async function launchRun(body) {
+  if (!state.selected) return;
+  const res = await fetch("/api/projects/" + encodeURIComponent(state.selected) + "/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) alert(data.error || "could not queue the run");
+  else if (data.queued && data.daemons === 0) alert("Run queued (job #" + data.jobId + "), but no executor daemon is connected — it will start once one connects.\n\nStart one with:\n  fsa daemon --server <this-server-url> --token <token>");
+  setTimeout(loadDetail, 400);
+}
+
 // Start/Continue = run (resume default); Restart = run + remap. The server launches using
 // the project's stored materials & config, so the UI just names the action.
 async function command(which) {
-  if (!state.selected) return;
-  const body = which === "restart" ? { verb: "run", remap: true } : { verb: "run" };
-  await fetch("/api/projects/" + encodeURIComponent(state.selected) + "/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  setTimeout(loadDetail, 400);
+  await launchRun(which === "restart" ? { verb: "run", remap: true } : { verb: "run" });
 }
 
 // --- edit config dialog ---
@@ -550,8 +558,7 @@ $("#runForm").onsubmit = async (e) => {
   const body = { verb: f.get("verb"),
     region: f.get("region") || undefined, scope: f.get("scope") || undefined,
     inputRunDir: f.get("inputRunDir") || undefined, quick: f.get("quick") === "on", mockLlm: f.get("mockLlm") === "on" };
-  await fetch("/api/projects/" + encodeURIComponent(state.selected) + "/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  setTimeout(loadDetail, 400);
+  await launchRun(body);
 };
 
 // --- live stream ---

@@ -1,15 +1,11 @@
-// Run-manager: launches and supervises audits so a UI/agent can run them across projects
-// concurrently. It calls the LIBRARY in-process (runAudit / runConfirm) rather than shelling
-// out to the CLI — the CLI is just a thin wrapper over the same functions, so calling them
-// directly yields the rich result objects (AuditRunResult / ConfirmRunResult) and finer
-// hooks (an AbortSignal for stop, an onRun callback for the DB run id). The audit's heavy
-// work (builds, tests) still runs in sandboxed subprocesses spawned by the bash tool.
+// Run-spec utilities shared by the control plane (server) and the execution plane (daemon):
+// the translation of a UI/agent LaunchSpec into an AuditorConfig (what the daemon runs) and
+// into equivalent `fsa` CLI argv (for display), plus the per-run ActivityBus the server uses
+// to fan a daemon's token-level activity out to the UI's live log. Execution itself lives in
+// the daemon (src/server/daemon.ts); this module holds no run state.
 
-import { runAudit, type AuditRunResult } from "../agent/audit.js";
-import { runConfirm, type ConfirmRunResult } from "../agent/confirm.js";
 import { defaultConfig, type AuditorConfig } from "../config.js";
-import { MockAuditLlmClient } from "../llm/mock.js";
-import type { MetadataStore, RunKind, RunStatus } from "../db/store.js";
+import type { RunKind } from "../db/store.js";
 
 const DEFAULT_OUT = "runs";
 const THINKING = new Set(["minimal", "low", "medium", "high", "xhigh"]);
@@ -65,24 +61,6 @@ export interface LaunchSpec {
   out?: string | undefined;
 }
 
-export interface ActiveRun {
-  runId: number | undefined; // the DB run id (once runAudit has recorded it)
-  target: string;
-  verb: RunKind;
-  startedAt: string;
-}
-
-interface RunHandle {
-  spec: LaunchSpec;
-  abort: AbortController;
-  startedAt: string;
-  status: "running" | "done" | "error" | "killed";
-  runId?: number;
-  result?: AuditRunResult | ConfirmRunResult;
-  error?: string;
-  activity: ActivityBus;
-}
-
 // Translate a launch spec into an AuditorConfig — the in-process equivalent of the CLI's
 // parseConfig + applyAuditPosture. Budgets are UNBOUNDED unless the spec caps them.
 export function specToConfig(spec: LaunchSpec, out: string): AuditorConfig {
@@ -119,105 +97,6 @@ export function specToConfig(spec: LaunchSpec, out: string): AuditorConfig {
     cfg.auditDeep = true; // run = map -> dig, unless --quick (breadth)
   }
   return cfg;
-}
-
-export class RunManager {
-  private readonly runs = new Map<number, RunHandle>();
-  private nextLaunchId = 1;
-
-  constructor(
-    private readonly store: MetadataStore,
-    private readonly out: string = DEFAULT_OUT,
-  ) {}
-
-  /** Launch a run in-process. Returns a launch id; the DB run id appears once runAudit
-   * records it (poll GET /api/projects/:name or /api/runs). */
-  launch(spec: LaunchSpec): { launchId: number; verb: RunKind } {
-    const launchId = this.nextLaunchId++;
-    const abort = new AbortController();
-    const handle: RunHandle = { spec, abort, startedAt: new Date().toISOString(), status: "running", activity: new ActivityBus() };
-    this.runs.set(launchId, handle);
-    const onRun = (runId: number): void => {
-      handle.runId = runId;
-    };
-    const onActivity = (ev: Activity): void => handle.activity.push(ev);
-    // Promise.resolve().then(...) so a synchronous build error becomes a rejection, not a throw.
-    void Promise.resolve()
-      .then(() => this.execute(spec, abort.signal, onRun, onActivity))
-      .then(
-        (result) => {
-          handle.result = result;
-          handle.status = abort.signal.aborted ? "killed" : "done";
-        },
-        (error) => {
-          handle.status = abort.signal.aborted ? "killed" : "error";
-          handle.error = error instanceof Error ? error.message : String(error);
-          // A crash before runAudit's own finalize leaves the DB row "running"; reconcile it.
-          if (handle.runId !== undefined) this.reconcile(handle.runId, handle.status === "killed" ? "killed" : "error");
-        },
-      );
-    return { launchId, verb: spec.verb };
-  }
-
-  private execute(spec: LaunchSpec, signal: AbortSignal, onRun: (runId: number) => void, onActivity: (ev: Activity) => void): Promise<AuditRunResult | ConfirmRunResult> {
-    const cfg = specToConfig(spec, spec.out ?? this.out);
-    if (spec.verb === "confirm") {
-      if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir (the finished run directory)");
-      return runConfirm(cfg, {
-        inputRunDir: spec.inputRunDir,
-        signal,
-        onRun,
-        onActivity,
-        ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}),
-        ...(spec.fresh ? { fresh: true } : {}),
-      });
-    }
-    return runAudit(cfg, {
-      kind: spec.verb,
-      signal,
-      onRun,
-      onActivity,
-      ...(spec.mockLlm ? { llm: new MockAuditLlmClient() } : {}),
-    });
-  }
-
-  /** The live activity bus for a run launched this session (token-level thinking/output +
-   * tool calls), or undefined for runs not in this session (use the persisted event log). */
-  activityFor(runId: number): ActivityBus | undefined {
-    for (const handle of this.runs.values()) if (handle.runId === runId) return handle.activity;
-    return undefined;
-  }
-
-  /** Request a cooperative stop of a running run (by its DB run id). */
-  stop(runId: number): boolean {
-    for (const handle of this.runs.values()) {
-      if (handle.runId === runId && handle.status === "running") {
-        handle.abort.abort();
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** The rich library result for a run launched this session (AuditRunResult / ConfirmRunResult). */
-  resultFor(runId: number): AuditRunResult | ConfirmRunResult | undefined {
-    for (const handle of this.runs.values()) if (handle.runId === runId) return handle.result;
-    return undefined;
-  }
-
-  active(): ActiveRun[] {
-    return [...this.runs.values()]
-      .filter((handle) => handle.status === "running")
-      .map((handle) => ({ runId: handle.runId, target: handle.spec.target, verb: handle.spec.verb, startedAt: handle.startedAt }));
-  }
-
-  private reconcile(runId: number, status: RunStatus): void {
-    try {
-      this.store.finishRun(runId, status);
-    } catch {
-      // best-effort
-    }
-  }
 }
 
 // Translate a launch spec into `fsa` CLI argv — NOT used to run (the manager runs in-process),

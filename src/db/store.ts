@@ -277,6 +277,7 @@ export class MetadataStore {
       this.db.prepare("DELETE FROM finding WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM scope WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM confirm_decision WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM job WHERE project = ?").run(String(project.name)); // jobs FK-reference runs
       this.db.prepare("DELETE FROM run WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM project WHERE id = ?").run(id);
     });
@@ -381,6 +382,7 @@ export class MetadataStore {
       this.db.prepare("DELETE FROM finding_status_event WHERE finding_id IN (SELECT id FROM finding WHERE run_id = ?)").run(id);
       this.db.prepare("DELETE FROM finding WHERE run_id = ?").run(id);
       this.db.prepare("DELETE FROM confirm_decision WHERE run_id = ?").run(id);
+      this.db.prepare("UPDATE job SET run_id = NULL WHERE run_id = ?").run(id); // keep the job record, drop the dangling ref
       this.db.prepare("DELETE FROM run WHERE id = ?").run(id);
     });
     return true;
@@ -601,6 +603,11 @@ export class MetadataStore {
 
   listJobs(limit = 100): Array<Record<string, unknown>> {
     return this.db.prepare("SELECT * FROM job ORDER BY created_at DESC LIMIT ?").all(Math.max(1, Math.floor(limit))) as Array<Record<string, unknown>>;
+  }
+
+  /** Jobs still in flight (queued/dispatched/running) — for the dashboard's active counts. */
+  runningJobs(): Array<Record<string, unknown>> {
+    return this.db.prepare("SELECT * FROM job WHERE status IN ('queued','dispatched','running') ORDER BY created_at DESC").all() as Array<Record<string, unknown>>;
   }
 
   // --- internals ------------------------------------------------------------

@@ -261,14 +261,18 @@ This is the backend the UI reads from; it is written live by each run (not rebui
 ### UI
 
 ```bash
-fsa ui                 # local dashboard at http://127.0.0.1:4500 (--port, --out to change)
+fsa ui                 # dashboard at http://127.0.0.1:4500 + a co-located executor daemon
+fsa ui --no-daemon     # control plane only — connect your own daemon(s) elsewhere
+fsa daemon --server http://<server>:4500 --token <token>   # run the executor on another machine
 ```
 
-A localhost-only web dashboard to track and drive audits across projects: per-project scope coverage (mapped vs audited, live), findings with their status timeline, and the bugs actually **confirmed** on the real target, updating in real time via SSE. Create a project, **Start/Continue** an audit (resume — next batch of scopes), **Restart** (re-map), **Run…** (map / audit a region / confirm), **Edit config**, or stop a running run — all from the UI. It binds to localhost only (it runs audits in-process and reads local code).
+A web dashboard to track and drive audits across projects: per-project scope coverage (mapped vs audited vs deferred, live), findings with their status timeline, and the bugs actually **confirmed** on the real target, updating in real time via SSE. Create a project, **Start/Continue** an audit (resume — next batch of scopes), **Restart** (re-map), **Run…** (map / audit a region / confirm), **Edit config**, or stop a running run — all from the UI.
+
+Execution is **decoupled** from the dashboard: the `fsa ui` server is a **control plane** (REST API + SQLite + a job queue) and the audit actually runs on a **daemon**, so the target code and provider keys stay on the daemon's machine. `fsa ui` spawns a co-located daemon by default; pass `--no-daemon` and run `fsa daemon` elsewhere (with a token from `fsa db mint-token`) to execute on a different host. The server binds to `127.0.0.1` by default; the daemon protocol is bearer-token-authenticated.
 
 ### HTTP API (agent-drivable)
 
-The UI is just one client of a REST API the `fsa ui` server exposes. **Every** operation the UI performs is an API call, so an agent can drive the whole workflow without the UI. The API is **self-describing**: `GET /api` returns a catalog of every resource and endpoint (method, path, params, body) — an agent fetches it once to learn the surface, then calls it.
+The UI is just one client of a REST API the `fsa ui` server exposes. **Every** operation the UI performs is an API call, so an agent can drive the whole workflow without the UI. The API is **self-describing**: `GET /api` returns a catalog of every resource and endpoint (method, path, params, body) — an agent fetches it once to learn the surface, then calls it. (The machine-to-machine `/api/daemon/*` protocol the executor uses is bearer-authenticated and omitted from the catalog.)
 
 ```bash
 curl localhost:4500/api                                   # catalog of every endpoint
@@ -279,7 +283,7 @@ curl 'localhost:4500/api/projects/p/findings?status=confirmed-differential'
 curl 'localhost:4500/api/projects/p/confirm-decisions?reproduced=yes'  # the confirmed bugs
 ```
 
-Resources: **project** (CRUD: `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/:name`), **run** (`POST /api/projects/:name/runs` to launch — `verb` run/map/audit/confirm with `remap`/`fresh`/`quick`/`region`/`scope`/`inputRunDir`; `GET /api/runs/:id`; `POST /api/runs/:id/stop`), **scope** / **finding** / **confirm-decision** (read, paginated + filterable). `GET /api/stream` is an SSE feed for live updates, and `GET /api/runs/:id/log` streams a run's live activity (the model's thinking/output + tool calls). The server runs the library (`runAudit`/`runConfirm`) **in-process** — not the CLI — so `GET /api/runs/:id` returns the rich `AuditRunResult`/`ConfirmRunResult` (full findings, summary, coverage) for runs it launched. A formal/published API can grow from this surface; for now it is localhost-only.
+Resources: **project** (CRUD: `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/:name`), **run** (`POST /api/projects/:name/runs` **enqueues a job** — `verb` run/map/audit/confirm with `remap`/`fresh`/`quick`/`region`/`scope`/`inputRunDir` — and returns its `jobId`; a connected daemon claims and runs it; `GET /api/runs/:id`; `POST /api/runs/:id/stop`), **scope** / **finding** / **confirm-decision** (read, paginated + filterable). `GET /api/stream` is an SSE feed for live updates, and `GET /api/runs/:id/log` streams a run's live token-level activity (the model's thinking/output + tool calls), fed by the executing daemon. A formal/published API can grow from this surface.
 
 ## Library API
 
