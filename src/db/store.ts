@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS run(
   run_scopes_done INTEGER,
   findings_total INTEGER,
   started_at TEXT NOT NULL,
+  dig_started_at TEXT,            -- map->dig boundary for a combined run (stamped at dig-loop start), so the UI can split map vs dig elapsed
   ended_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_project ON run(project_id);
@@ -274,6 +275,7 @@ export class MetadataStore {
       "ALTER TABLE daemon ADD COLUMN workspace TEXT",
       "ALTER TABLE run ADD COLUMN run_scopes_target INTEGER",
       "ALTER TABLE run ADD COLUMN run_scopes_done INTEGER",
+      "ALTER TABLE run ADD COLUMN dig_started_at TEXT", // map->dig boundary for splitting a combined run's elapsed
       "ALTER TABLE finding ADD COLUMN tracking_status TEXT", // submission tracking: open|triaging|submitted|accepted|fixed|duplicate|rejected
     ]) {
       try {
@@ -424,11 +426,13 @@ export class MetadataStore {
   }
 
   /** Per-run dig batch: how many scopes THIS run is digging (target) and how many it has
-   * completed (done) — distinct from the project-cumulative scopes_* above. */
+   * completed (done) — distinct from the project-cumulative scopes_* above. The FIRST call
+   * (dig-loop start, done=0) also stamps dig_started_at = the map->dig boundary, so the UI can
+   * split a combined map->dig run's elapsed into the two phases. COALESCE keeps it fixed. */
   updateRunScopes(runId: number, done: number, target: number): void {
     this.db
-      .prepare("UPDATE run SET run_scopes_done = ?, run_scopes_target = ? WHERE id = ?")
-      .run(done, target, runId);
+      .prepare("UPDATE run SET run_scopes_done = ?, run_scopes_target = ?, dig_started_at = COALESCE(dig_started_at, ?) WHERE id = ?")
+      .run(done, target, now(), runId);
   }
 
   listRuns(projectId?: number, limit?: number): Array<Record<string, unknown>> {

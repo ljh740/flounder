@@ -651,18 +651,17 @@ function phaseState(d, pr) {
   const mapRunning = !!audit && audit.kind !== "audit" && !digStarted;
   const digRunning = !!audit && (audit.kind === "audit" || digStarted);
   const thisRun = audit && audit.run_scopes_target != null ? " · this run " + (audit.run_scopes_done ?? 0) + "/" + audit.run_scopes_target : "";
-  // map and dig share ONE run, so split its elapsed at the map->dig boundary. map ends when the
-  // scope inventory is persisted; PENDING (un-audited) scopes keep that batch timestamp (dig only
-  // re-stamps audited ones — verified stable), so the earliest pending updated_at ~ map's end.
-  // Falls back to whole-run elapsed when there is no pending scope to mark the boundary.
+  // map and dig share ONE run, so split its elapsed at the map->dig boundary recorded on the run
+  // as dig_started_at (stamped once when the dig loop begins — a STABLE timestamp, unlike scope
+  // updated_at which the dig re-stamps per scope). map = run start -> boundary; dig = boundary ->
+  // end/now (monotonic, never resets). Falls back to the whole-run elapsed when no boundary yet.
   const auditRun = audit || auditLatest;
   const startMs = auditRun && auditRun.started_at ? new Date(auditRun.started_at).getTime() : 0;
   const endMs = auditLatest && auditLatest.ended_at ? new Date(auditLatest.ended_at).getTime() : 0;
-  const pendTs = (d.scopes || []).filter((sc) => sc.status !== "audited" && sc.updated_at).map((sc) => new Date(sc.updated_at).getTime()).filter((t) => t > 0);
-  const mapEndMs = pendTs.length ? Math.min.apply(null, pendTs) : 0;
-  const mapDur = mapRunning ? runDur(audit, true) : (pr.total > 0 && startMs && mapEndMs > startMs ? fmtDur(mapEndMs - startMs) : "");
-  const digDur = digRunning ? (mapEndMs ? fmtDur(Date.now() - mapEndMs) : runDur(audit, true))
-    : (pr.audited > 0 ? (mapEndMs && endMs > mapEndMs ? fmtDur(endMs - mapEndMs) : runDur(auditLatest, false)) : "");
+  const boundMs = auditRun && auditRun.dig_started_at ? new Date(auditRun.dig_started_at).getTime() : 0;
+  const mapDur = mapRunning ? runDur(audit, true) : (pr.total > 0 && startMs && boundMs > startMs ? fmtDur(boundMs - startMs) : "");
+  const digDur = digRunning ? (boundMs ? fmtDur(Date.now() - boundMs) : runDur(audit, true))
+    : (pr.audited > 0 ? (boundMs && endMs > boundMs ? fmtDur(endMs - boundMs) : runDur(auditLatest, false)) : "");
   return {
     prepare: { status: prep ? prep.status : "none", stat: prep ? (prep.status === "done" ? "source staged" : prep.status) : "not run", dur: runDur(prep, prep && prep.status === "running") },
     map: { status: mapRunning ? "running" : (pr.total > 0 ? "done" : "none"), stat: pr.total > 0 ? pr.total + " obligations" : "—",
