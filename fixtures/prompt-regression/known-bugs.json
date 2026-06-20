@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "description": "Known-bug prompt regression registry. Fixtures are minimized public-safe targets; local reports and run artifacts are evidence sources, not prompt input.",
+  "promptContract": {
+    "requiredNeedles": [
+      {
+        "needle": "what MUST this equal",
+        "capability": "trusted value binding"
+      },
+      {
+        "needle": "DESIGN INTENT",
+        "capability": "derive obligations from design material"
+      },
+      {
+        "needle": "wrong referent",
+        "capability": "do not accept a constraint to the wrong source value"
+      },
+      {
+        "needle": "canonical/range-checked",
+        "capability": "check canonical decoding and ranges at serialization boundaries"
+      },
+      {
+        "needle": "silent normalization",
+        "capability": "catch decoders that change the checked statement"
+      },
+      {
+        "needle": "ACTUAL vulnerable code path",
+        "capability": "execution confirmation must exercise the real path"
+      },
+      {
+        "needle": "only capabilities a real attacker actually has",
+        "capability": "attacker-real PoC construction"
+      },
+      {
+        "needle": "LEGITIMATE authority",
+        "capability": "trace effect sinks back to legitimate authority"
+      }
+    ],
+    "forbiddenDefaultPromptNeedles": [
+      "Orchard_Security_Bugv2",
+      "Zcash",
+      "halo2_gadgets",
+      "numRealTransactions",
+      "RollupProcessorV3",
+      "0x074ec9317d8336db37e8c348fbdd7515573ff4088239c77ab429f522509aeeb1",
+      "0xff1f2b4adb9df6fc8eafecdcbf96a2b351680455",
+      "TurboVerifier",
+      "recursive_P1",
+      "recursive_P2",
+      "Bn254Crypto",
+      "r_mod",
+      "p_mod",
+      "0x48cb7ba00d087541dc8e2b3738f80fdd1fee8ce8",
+      "0x737901bea3eeb88459df9ef1be8ff3ae1b42a2ba"
+    ]
+  },
+  "cases": [
+    {
+      "id": "zcash-orchard-halo2-missing-constraint",
+      "label": "Zcash Orchard / Halo2 missing constraint",
+      "requiredFixtures": [
+        "fixtures/halo2_missing_constraint.rs",
+        "fixtures/halo2_scalar_mul_binding.rs"
+      ],
+      "localEvidenceSummary": "Local Orchard PDF and prior focused runs showed a missing binding between assigned advice cells and the trusted source/base value. The public fixture keeps only the generic Halo2 assignment/binding shape.",
+      "expectedLiveEvalSignals": [
+        "derive an obligation from design intent rather than code appearance",
+        "ask what assigned or witnessed cells must equal",
+        "treat an absent or wrong-referent constraint as a finding",
+        "avoid clearing the code because it is canonical or upstream"
+      ],
+      "artifactSignalGroups": [
+        {
+          "name": "assignment binding",
+          "anyOf": ["assign_advice", "assigned advice", "witnessed cell"]
+        },
+        {
+          "name": "trusted source referent",
+          "anyOf": ["trusted source", "required source", "base_x", "base value"]
+        },
+        {
+          "name": "missing or wrong constraint",
+          "anyOf": ["missing constraint", "wrong referent", "unconstrained", "copy_advice"]
+        }
+      ],
+      "doNotInjectIntoPrompt": [
+        "Orchard_Security_Bugv2",
+        "Zcash",
+        "halo2_gadgets"
+      ]
+    },
+    {
+      "id": "aztec-2026-06-14-unbound-settlement-count",
+      "label": "Aztec June 14 unbound settlement count",
+      "requiredFixtures": [
+        "fixtures/prompt-regression/aztec_unbound_settlement_count.sol"
+      ],
+      "localEvidenceSummary": "The local incident write-up reconstructs a count that drives settlement but is not part of the verified proof commitment. The minimized fixture keeps only the commitment/settlement split.",
+      "expectedLiveEvalSignals": [
+        "map value and asset-flow sinks before deep audit",
+        "trace every count or length that drives settlement back to the proof commitment",
+        "connect a committed-but-unsettled deposit to a later withdrawal sink",
+        "confirm with an attacker-real local PoC, not a verifier stub that accepts arbitrary statements"
+      ],
+      "artifactSignalGroups": [
+        {
+          "name": "count drives settlement",
+          "anyOf": ["settlementCount", "numRealTransactions", "count that drives settlement", "settlement loop"]
+        },
+        {
+          "name": "count not bound to proof statement",
+          "anyOf": ["publicInputsHash", "proof commitment", "verified statement", "not part of the hash"]
+        },
+        {
+          "name": "asset-flow sink impact",
+          "anyOf": ["deposit", "withdrawal", "processDepositsAndWithdrawals", "mint"]
+        }
+      ],
+      "doNotInjectIntoPrompt": [
+        "numRealTransactions",
+        "RollupProcessorV3",
+        "0x074ec9317d8336db37e8c348fbdd7515573ff4088239c77ab429f522509aeeb1"
+      ]
+    },
+    {
+      "id": "aztec-2026-06-17-recursive-verifier-boundary",
+      "label": "Aztec June 17 recursive verifier boundary",
+      "requiredFixtures": [
+        "fixtures/prompt-regression/aztec_recursive_verifier_boundary.sol"
+      ],
+      "localEvidenceSummary": "Local aztec-0617 run artifacts showed recursive verifier findings around accumulator pairing composition and canonical public-input decoding. The minimized fixture keeps only those generic verifier-boundary obligations.",
+      "expectedLiveEvalSignals": [
+        "derive the recursive accumulator obligation before trusting group arithmetic",
+        "check whether decoded coordinates are canonical field elements in the expected domain",
+        "notice silent modular normalization across field domains",
+        "compare the implemented pairing composition against the documented relation without relying on target names"
+      ],
+      "artifactSignalGroups": [
+        {
+          "name": "recursive accumulator obligation",
+          "anyOf": ["recursive", "accumulator", "pairing relation", "performPairing"]
+        },
+        {
+          "name": "canonical decoding and range",
+          "anyOf": ["canonical", "range", "limb", "public input"]
+        },
+        {
+          "name": "domain or modulus mismatch",
+          "anyOf": ["modulus", "field", "silent normalization", "scalar", "base"]
+        }
+      ],
+      "doNotInjectIntoPrompt": [
+        "TurboVerifier",
+        "recursive_P1",
+        "recursive_P2",
+        "Bn254Crypto",
+        "r_mod",
+        "p_mod"
+      ]
+    }
+  ]
+}

@@ -402,9 +402,9 @@ function confirmFailureReason(
   return `missing success patterns: ${patternCheck.missing.join(" | ")}`;
 }
 
-/** Report files the framework reads back from the workspace (findings + the map's scope inventory). */
+/** Report files the framework reads back from the workspace. */
 export function isReportFile(normalizedPath: string): boolean {
-  return normalizedPath === "findings.json" || normalizedPath === "scopes.json";
+  return normalizedPath === "findings.json" || normalizedPath === "scopes.json" || normalizedPath === "prepare_manifest.json" || normalizedPath === "confirm_decision.json";
 }
 
 /** True when the path is part of the pristine target source the model may not modify. */

@@ -14,7 +14,7 @@ import { renderToolCatalogue } from "./tools.js";
 // actually could) that the model applies per case. It is the constructive form of
 // the standard the refutation step already enforces (ground 2): a PoC that grants the
 // attacker a capability the deployed system would deny proves a counterfactual.
-const POC_TRUST_RULE = `- Build the PoC the way the ATTACKER would: assume only the capabilities a real attacker actually has against the deployed system, and never grant yourself one the system would deny them. Exercise the real components rather than stubbing whatever the system trusts or pins; where a trusted component genuinely cannot run locally, the stub must reproduce only behavior an attacker could really obtain from it — success only for an input an honest party could truly produce, a value within its real bounds — never blanket success. If the exploit only works once you give yourself a capability the attacker lacks, you have not shown a real bug; record it as suspected.`;
+export const POC_TRUST_RULE = `- Build the PoC the way the ATTACKER would: you may create local tests/harnesses and construct malicious inputs, calls, signatures, proofs, or local-fork state, but assume only capabilities a real attacker actually has against the deployed system and never grant yourself one the system would deny them. Exercise the real components rather than stubbing whatever the system trusts or pins; where a trusted component genuinely cannot run locally, the stub must reproduce only behavior an attacker could really obtain from it — success only for an input an honest party could truly produce, a value within its real bounds — never blanket success. If the exploit only works once you give yourself a capability the attacker lacks, you have not shown a real bug; record it as suspected.`;
 
 export const AUDIT_SYSTEM = `You are an autonomous white-hat security auditor working on AUTHORIZED source code.
 Your goal is to find real, exploitable, high-impact security vulnerabilities in the loaded source and to prove them.
@@ -32,6 +32,10 @@ later logic relies on but nothing binds to its required value is a classic bug; 
 does not help if the value feeding it is unconstrained. Reaching a file is not the same as auditing it: when a
 component looks standard, state the exact invariant it must satisfy and find the line that enforces it before
 concluding it is correct.
+
+At serialization, ABI, FFI, proof, and transcript boundaries, discharge the one-to-one interpretation
+obligation explicitly: exact length, canonical/range-checked encoding, correct domain/modulus/units, and no
+silent normalization that changes the statement the rest of the code believes it is checking.
 
 Trust nothing external as ground truth. Agreement with a reference implementation, an upstream version, a
 spec, a book, or a prior audit is NOT evidence of correctness — the reference can carry the same bug, and some
@@ -90,6 +94,7 @@ Method — obligation-driven audit (general method, not a hint about this target
 
 3. DISCHARGE each obligation one at a time. For each, find the SPECIFIC constraint/check/line that enforces it:
    - Finding that "a constraint exists" is NOT discharge. State exactly what the constraint binds the value to, then confirm that referent is the value the obligation actually requires — not merely some adjacent or internal value that happens to be related, and not merely a relationship among witnessed values when the property names a specific trusted source. A value bound to the wrong referent leaves the obligation UNMET.
+   - At serialization, ABI, FFI, proof, and transcript boundaries, discharge includes one-to-one interpretation: exact length, canonical/range-checked encoding, correct domain/modulus/units, and no silent normalization that changes the statement being checked.
    - If no line enforces the obligation, that ABSENCE is the finding. Missing-constraint bugs do not look wrong on any single line — they look like ordinary assignment, witnessing, or decoding — so you must reason from the obligation, never from whether the code "looks standard".
    - "Looks standard", "matches upstream", "the spec says it does X", or "this is the audited/canonical implementation" are NEVER discharge. The reference can carry the same bug; some bugs live in the canonical code itself. Discharge an obligation only by naming the enforcing line, or refute it with an executable counterexample.
 
@@ -210,6 +215,7 @@ export const AUDIT_VERIFY_SYSTEM = `You are an autonomous white-hat security aud
 
 Method:
 1. Read the exact cited code, its callers/callees/modifiers, and — critically — whether the claimed-unconstrained value is actually bound elsewhere (a verified hash/proof, a require, a modifier, a check in the caller). Many "X is unconstrained" claims are false because X is committed in a verified hash or checked nearby.
+   At decode/serialization/proof boundaries, also check whether the value is length-checked, canonical/range-checked, and interpreted in the correct domain/modulus/units rather than silently normalized into a different statement.
 2. Build a local PoC test (a NEW test/scratch file in the sandbox) that exercises the ACTUAL code path and demonstrates the claimed bug: construct the malicious input/condition and show the invariant breaks or the code accepts what it must reject. Run it with purpose=confirm and declared success_patterns.
 3. Reach a verdict and write findings.json:
    - REAL: the PoC passes and triggers the bug -> record the finding at its true severity, cite command_id of the passing confirm run, and supply fix_patch + patched_success_patterns so the framework can differentially confirm (exploit reproduces before the fix, blocked after).
@@ -248,6 +254,49 @@ Loaded source files:
 ${input.fileManifest}
 
 Verify the claim: read the cited code and its bindings, then write and run a PoC test that either reproduces the bug (-> confirmed, with fix_patch + patched_success_patterns) or, after genuine effort, demonstrates it cannot reproduce (-> write a "REFUTED:" info finding citing the mitigating code). Respond with one JSON tool action or done object.`;
+}
+
+export const AUDIT_SYNTHESIS_SYSTEM = `You are an autonomous white-hat security auditor in SYNTHESIS mode on AUTHORIZED source code. The per-scope deep audit has finished; each scope was audited IN ISOLATION. Your job is to find exploits that NO single scope could see — bugs that exist only in the COMPOSITION of multiple components, where each part can look acceptable on its own.
+
+Sink-driven method (general, not a hint about this target):
+1. ENUMERATE the security-critical SINKS — every place the system produces an irreversible, privileged effect: value or authority leaves the system (funds out, mint, burn, role/owner/allowance change), or a guarded state transition commits. A sink is critical wherever it lives, in any component or language.
+2. For EACH sink, trace BACKWARD across components every value that decides the effect — recipient, amount, asset, the caller, and whatever is supposed to AUTHORIZE it (a proof, a signature, a balance, on-chain state). Follow each to where it is established and ask: is it bound to a LEGITIMATE authority along the WHOLE path to the sink? A value constrained inside one component but arriving UN-bound at the sink — or a sink reachable by a caller/path that never proves the authority the effect requires — is the bug, even when every individual component looked correct in its own scope.
+3. A "by-design" / emergency / escape / admin / fallback / privileged path is itself a trust boundary, never a discharge: ask what effect it grants and whether each effect is bound to a legitimate authority. "This path is intended to exist" is NOT a reason it is safe; "this parameter cannot be forged" does NOT clear the path if the path still authorizes the effect.
+4. COMPOSE the chain: who can reach the sink (entry + authorization) + the unbound or under-constrained input it carries + the sink effect = ONE concrete attacker action. The links may come from DIFFERENT scopes below; assembling them across scope boundaries is the entire point of this phase.
+
+Confirm at the SINK, not the link: a composition finding is confirmed-executable only when a PoC demonstrates the END effect — funds move, an invariant breaks, or an unauthorized state change commits — not when one intermediate constraint is shown missing. Where the full chain genuinely cannot be built locally (e.g. it needs a real proof/circuit/oracle), record a "suspected" finding that names the exact chain (entry → unbound input → sink), each link's file:line, and the attacker impact — a surfaced cross-component chain beats a silently dropped one.
+${POC_TRUST_RULE}`;
+
+export function buildSynthesisKickoff(input: {
+  target: string;
+  tools: AgentTool[];
+  scopeNote?: string;
+  fileManifest: string;
+  memoryHint?: string;
+  maxSteps: number;
+  synthesize: string;
+}): string {
+  return `Target: ${input.target}
+Mode: SYNTHESIS — compose per-scope results into cross-component attack chains. Up to ${input.maxSteps} actions.
+
+Prior per-scope audit (the material to compose — do NOT just re-list it; find what its pieces ENABLE together):
+${input.synthesize}
+
+Authorized scope note:
+${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() : "(none provided — treat all loaded source as in scope)"}
+
+Design-intent material (specs, books, design notes) is under corpus/ in your workspace — read it to derive sink obligations and authority chains.
+
+Available tools:
+${renderToolCatalogue(input.tools)}
+
+Durable memory from prior runs of this target:
+${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim() : "(empty)"}
+
+Loaded source files:
+${input.fileManifest}
+
+Begin the sink-driven synthesis: enumerate security-critical sinks, trace each backward across components for input or authority that arrives unbound, compose concrete attacker actions, then write findings.json. Respond with one JSON tool action or done object.`;
 }
 
 // CONFIRM mode (`flounder confirm`): the open-world counterpart to the network-sealed

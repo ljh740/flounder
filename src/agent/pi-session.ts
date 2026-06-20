@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { LlmClient } from "../types.js";
-import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, type TranscriptStep } from "./prompts.js";
+import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
 import { describeAction, readScratchScopes, scratchHasFindings, type AgentTool, type ToolContext } from "./tools.js";
 
 // Continuous-session driver (point 5). Instead of re-driving a stateless
@@ -300,7 +300,7 @@ function toPiTool(tool: AgentTool, ctx: ToolContext, nextStep: () => number, ste
   });
 }
 
-const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
+export const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
   read: Type.Object({
     path: Type.String(),
     start: Type.Optional(Type.Integer()),
@@ -318,7 +318,7 @@ const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
   }),
   bash: Type.Object({
     cmd: Type.String(),
-    purpose: Type.Optional(Type.Union([Type.Literal("inspect"), Type.Literal("confirm")])),
+    purpose: Type.Optional(Type.Union([Type.Literal("inspect"), Type.Literal("build"), Type.Literal("confirm")])),
     cwd: Type.Optional(Type.String()),
     success_patterns: Type.Optional(Type.Array(Type.String())),
     expected_exit_code: Type.Optional(Type.Integer()),
@@ -326,27 +326,32 @@ const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
   }),
 };
 
-function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; verify?: string; synthesize?: string; confirm?: string; prepare?: string }): string {
+export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; verify?: string; synthesize?: string; confirm?: string; prepare?: string }): string {
   // Confirm is the open-world mode: it has its own white-hat line (fork/read live
   // networks OK, never broadcast), so it does NOT share the local-only scaffold below.
   if (input.prepare) return buildPrepareSessionPrompt({ prepare: input.prepare, fileManifest: input.fileManifest, ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   if (input.confirm) return buildConfirmSessionPrompt({ confirm: input.confirm, fileManifest: input.fileManifest, ...(input.scopeNote ? { scopeNote: input.scopeNote } : {}), ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   const intro = input.synthesize ? synthesizeIntro(input.synthesize) : input.verify ? verifyIntro(input.verify) : input.map ? mapIntro() : input.deep ? deepIntro(input.deepFocus) : breadthIntro();
+  const reportingBlock = input.map
+    ? ""
+    : `
+How to report:
+- Record candidates by writing findings.json at the workspace root: a JSON array of objects with fields title, severity (info|low|medium|high|critical), location ("file:line"), description, evidence, exploit_sketch, fix, confidence (0..1), and optionally command_id.
+- The one hard rule the framework enforces: a claim is only confirmed-executable if it cites command_id of a purpose=confirm bash run that actually passed. Everything else is recorded as an unconfirmed hypothesis.
+- A confirm test must exercise the ACTUAL vulnerable code path: construct the malicious input or condition and show the code accepts it or the invariant breaks. A test that merely prints a success string without triggering the bug proves nothing — do not cite it. The dependency toolchain is prepared automatically on your first test run, so allow extra time for that first compile.
+${POC_TRUST_RULE}
+- For the STRONGEST confirmation (confirmed-differential), also supply on the finding: "fix_patch": {"path": target-source file, "old": exact text to replace, "new": the minimal fix}, and "patched_success_patterns": [strings your test prints once the exploit is BLOCKED]. The framework applies your fix to the pristine source and re-runs your test: a real bug's exploit reproduces before the fix and is blocked after it. You cannot apply the fix yourself (you may not modify target source) — that is deliberate, so the proof is the framework's, not yours.
+
+Trust boundaries (do not lose a real bug just because its proof lives outside this source):
+- If a security property's correctness depends on a component NOT in the loaded source — a ZK circuit / verification key, an oracle, a proxy/upgradeable implementation, an external contract's semantics, or an off-chain service — do NOT assume that component enforces what the in-scope code trusts it to, and do NOT drop the concern just because no in-scope confirm test can reach it. The in-scope code "correctly trusting the proof/oracle/impl" is exactly where such bugs hide. Record it as a "suspected" finding that names the trusted assumption, the exact line relying on it, the attacker impact if the assumption fails, and what is needed to settle it (e.g. "needs the circuit/VK to confirm"). A surfaced cross-boundary suspicion beats a silently dropped real bug.
+`;
   return `${intro}
 
 Use the provided tools to investigate:
 - read: read loaded source/corpus or files you create in the sandbox.
 - write / edit: create or modify your own test/scratch files inside the copied workspace. You CANNOT modify the target source under audit — write tests as new files; to show a fix, declare it in the finding's "fix" field and the framework applies it during confirmation.
-- bash: run one local command. Use purpose="inspect" to explore (ls/find/rg/cat). Use purpose="confirm" to PROVE a bug with a real local test/build runner (cargo test, forge test, go test, node --test, pytest, …) and declared success_patterns.
-
-How to report:
-- Record candidates by writing findings.json at the workspace root: a JSON array of objects with fields title, severity (info|low|medium|high|critical), location ("file:line"), description, evidence, exploit_sketch, fix, confidence (0..1), and optionally command_id.
-- The one hard rule the framework enforces: a claim is only confirmed-executable if it cites command_id of a purpose=confirm bash run that actually passed. Everything else is recorded as an unconfirmed hypothesis.
-- A confirm test must exercise the ACTUAL vulnerable code path: construct the malicious input or condition and show the code accepts it or the invariant breaks. A test that merely prints a success string without triggering the bug proves nothing — do not cite it. The dependency toolchain is prepared automatically on your first test run, so allow extra time for that first compile.
-- For the STRONGEST confirmation (confirmed-differential), also supply on the finding: "fix_patch": {"path": target-source file, "old": exact text to replace, "new": the minimal fix}, and "patched_success_patterns": [strings your test prints once the exploit is BLOCKED]. The framework applies your fix to the pristine source and re-runs your test: a real bug's exploit reproduces before the fix and is blocked after it. You cannot apply the fix yourself (you may not modify target source) — that is deliberate, so the proof is the framework's, not yours.
-
-Trust boundaries (do not lose a real bug just because its proof lives outside this source):
-- If a security property's correctness depends on a component NOT in the loaded source — a ZK circuit / verification key, an oracle, a proxy/upgradeable implementation, an external contract's semantics, or an off-chain service — do NOT assume that component enforces what the in-scope code trusts it to, and do NOT drop the concern just because no in-scope confirm test can reach it. The in-scope code "correctly trusting the proof/oracle/impl" is exactly where such bugs hide. Record it as a "suspected" finding that names the trusted assumption, the exact line relying on it, the attacker impact if the assumption fails, and what is needed to settle it (e.g. "needs the circuit/VK to confirm"). A surfaced cross-boundary suspicion beats a silently dropped real bug.
+- bash: run one local command. Use purpose="inspect" to explore (ls/find/rg/cat). Use purpose="build" for dependency resolution or compilation that makes the workspace buildable; it is not confirmation-eligible. Use purpose="confirm" to PROVE a bug with a real local test/build runner (cargo test, forge test, go test, node --test, pytest, …) and declared success_patterns.
+${reportingBlock}
 
 White-hat boundaries (non-negotiable):
 - Verification is local-only: unit tests, component tests, local regtest/devnet, or forked/fake nodes. Never target a public testnet, mainnet, production, or any live network.
@@ -371,9 +376,9 @@ ${input.map
         : "Begin the audit. When you have investigated thoroughly and written findings.json, stop."}`;
 }
 
-const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering the most soundness-critical regions you saw (entrypoints that move value, accounting/share math, authorization, liquidation/swap invariants, oracle binding). Partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
+const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering the most soundness-critical regions you saw under the three general lenses: spec conditions, value/asset flow, and trusted-but-unbound inputs. Partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
 
-const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis you have already done, WRITE findings.json now at the workspace root as your very next action — call the write tool once with the obligations you enumerated for this region and EACH one's status: either discharged (state the exact enforcing line) or suspected (state root cause, exact location, attacker impact, and a fix). Do NOT mark anything confirmed/confirmed-executable — that status requires a test you actually ran and passed, and the budget is gone. Persisting your suspected/discharged analysis is the goal; partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
+export const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis and command results you have already produced, WRITE findings.json now at the workspace root as your very next action — call the write tool once with the obligations you enumerated for this region and EACH one's status: discharged (state the exact enforcing line), suspected (state root cause, exact location, attacker impact, and a fix), or confirmed only if you already ran a purpose=confirm command that passed and actually exercised the vulnerable path. Do NOT invent a confirmation now and do NOT mark anything confirmed by assertion; confirmed entries must cite that already-passing command_id. Persisting your suspected/discharged/confirmed analysis is the goal; partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
 
 const PREPARE_FINALIZE_PROMPT = `Your budget is spent. Do NOT fetch or run anything else. WRITE prepare_manifest.json now at the workspace root as your very next action — call the write tool once with an object: {"clue","posture","match_deployed"(bool),"scope_declaration":"<where the in-scope set came from: the audited addresses and/or the project's own scope doc>","components":[{"role":"target|dependency|implementation|verifier|other","identity":"<address / package / path / etc.>","platform":"<chain / registry / host, or 'none'>","revision":"<block / version / commit / digest>","source":"<verified|published|repo@commit|unverified>","staged_path":"<workspace-relative path/glob of this component's code>","in_scope":(bool),"scope_basis":"deployed-match|project-scope-doc|first-party|dependency|off-deployment-boundary","match":"matched|unverified|n/a","match_evidence"}],"offscope":[{"kind":"circuit|spec|docs|prior-audit|other","resolved":(bool),"where","note"}],"gaps":[...],"answer_firewall":"clean|flagged: ...","notes"}. Record honestly: a deployed component you could not match is "unverified"; a non-deployed one is "n/a" with its source origin pinned; in_scope=true for the deployment-matched target / project-declared in-scope / first-party code, false for third-party deps and off-deployment trust boundaries (a FACT from deployment + the project's scope, not a guess about bugs); anything you could not find is a gap, not a guess. After writing, emit {"done": true}. Output only the write tool call.`;
 
@@ -423,7 +428,7 @@ function verifyIntro(claim: string): string {
 The suspected finding to verify:
 ${claim}
 
-Method: (1) read the cited code + its callers/callees/modifiers, and check whether the claimed-unconstrained value is actually bound elsewhere (a verified hash/proof, a require, a check) — many "X is unconstrained" claims are false. (2) Write a NEW PoC test in the sandbox that exercises the ACTUAL code path and triggers the claimed bug; run it with purpose=confirm and success_patterns. (3) Verdict in findings.json: if the PoC passes and triggers the bug, record the finding at its true severity citing command_id, and supply fix_patch + patched_success_patterns for differential confirmation; if after genuine effort it cannot reproduce because the claim is mitigated/false, record ONE finding of severity "info" whose title starts "REFUTED:" with evidence citing the exact mitigating line. Never confirm by assertion — default to refuting unless an executable PoC proves it.`;
+Method: (1) read the cited code + its callers/callees/modifiers, and check whether the claimed-unconstrained value is actually bound elsewhere (a verified hash/proof, a require, a check) — many "X is unconstrained" claims are false. At decode/serialization/proof boundaries, also check whether the value is length-checked, canonical/range-checked, and interpreted in the correct domain/modulus/units rather than silently normalized into a different statement. (2) Write a NEW PoC test in the sandbox that exercises the ACTUAL code path and triggers the claimed bug; run it with purpose=confirm and success_patterns. (3) Verdict in findings.json: if the PoC passes and triggers the bug, record the finding at its true severity citing command_id, and supply fix_patch + patched_success_patterns for differential confirmation; if after genuine effort it cannot reproduce because the claim is mitigated/false, record ONE finding of severity "info" whose title starts "REFUTED:" with evidence citing the exact mitigating line. Never confirm by assertion — default to refuting unless an executable PoC proves it.`;
 }
 
 function mapIntro(): string {
@@ -445,7 +450,7 @@ Your goal is to find real, exploitable, high-impact security vulnerabilities and
 
 You are in full control of the investigation. There is no fixed checklist and no required bug taxonomy. Decide for yourself what to read, what to suspect, which hypotheses to test, and when to stop. Use the full depth of your own security knowledge: form a model of what the code must guarantee (its invariants and trust boundaries), then look for where the implementation lets an attacker break that guarantee.
 
-General method (applies to any code, not a hint about this target): for every value the code trusts — especially anything assigned, witnessed, decoded, or taken as input — explicitly ask "what MUST this equal for the security property to hold, and is there a visible check/constraint that enforces it?" A value later logic relies on but nothing binds to its required value is a classic bug. Reaching a file is not auditing it: when a component looks standard, state the exact invariant it must satisfy and find the line that enforces it before concluding it is correct. Trust nothing external as ground truth: agreement with a reference implementation, an upstream version, a spec, a book, or a prior audit is NOT evidence of correctness — the reference can carry the same bug, and some bugs live in the canonical implementation itself. Never clear a component because it "matches upstream", looks "standard", or matches the spec; clear it only by naming the exact invariant and the constraint that enforces it, or by an executable counterexample. Reason from the security property itself, not from what the materials say the code does. Record credible suspicions to findings.json as hypotheses (with location and why) as you go — do not hold them only in your head.`;
+General method (applies to any code, not a hint about this target): for every value the code trusts — especially anything assigned, witnessed, decoded, or taken as input — explicitly ask "what MUST this equal for the security property to hold, and is there a visible check/constraint that enforces it?" A value later logic relies on but nothing binds to its required value is a classic bug. Reaching a file is not auditing it: when a component looks standard, state the exact invariant it must satisfy and find the line that enforces it before concluding it is correct. At serialization, ABI, FFI, proof, and transcript boundaries, discharge the one-to-one interpretation obligation explicitly: exact length, canonical/range-checked encoding, correct domain/modulus/units, and no silent normalization that changes the statement the rest of the code believes it is checking. Trust nothing external as ground truth: agreement with a reference implementation, an upstream version, a spec, a book, or a prior audit is NOT evidence of correctness — the reference can carry the same bug, and some bugs live in the canonical implementation itself. Never clear a component because it "matches upstream", looks "standard", or matches the spec; clear it only by naming the exact invariant and the constraint that enforces it, or by an executable counterexample. Reason from the security property itself, not from what the materials say the code does. Record credible suspicions to findings.json as hypotheses (with location and why) as you go — do not hold them only in your head.`;
 }
 
 function deepIntro(deepFocus?: string): string {
@@ -458,6 +463,7 @@ ${focus ? `Focus region (pinned): ${focus}. Audit this region.` : "No focus is p
 Obligation-driven method (general, not a hint about this target):
 - ENUMERATE obligations from DESIGN INTENT, not the code's appearance. Read the design material under corpus/ and the higher-level code that USES this region to determine what it is SUPPOSED to guarantee. Write each obligation explicitly as "value/relationship X must equal/hold Y for property P". The code cannot tell you what it should enforce; the intent does.
 - DISCHARGE each obligation one at a time. Finding that "a constraint exists" is NOT discharge: state exactly what the constraint binds the value to and confirm that referent is the value the obligation actually requires — not merely an adjacent/internal value, and not merely a relationship among witnessed values when the property names a specific trusted source. A value bound to the wrong referent leaves the obligation UNMET.
+- At serialization, ABI, FFI, proof, and transcript boundaries, discharge includes one-to-one interpretation: exact length, canonical/range-checked encoding, correct domain/modulus/units, and no silent normalization that changes the statement being checked.
 - A MISSING enforcing constraint is the finding. Missing-constraint bugs look like ordinary assignment/witnessing on every line — reason from the obligation, never from whether the code "looks standard", "matches upstream", or is "the canonical implementation" (the reference can carry the same bug; some bugs live in the canonical code itself).
 - Record every obligation and its status (discharged-with-line / UNMET / uncertain) to findings.json as you go; an UNMET obligation is a finding (or a hypothesis with location and the exact missing edge).`;
 }

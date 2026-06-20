@@ -2,7 +2,7 @@ import type { AuditorConfig } from "../config.js";
 import type { LlmClient } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
 import { extractJsonArray, extractJsonObject } from "../util/json.js";
-import { buildConfirmKickoff, buildDeepKickoff, buildAuditKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_SYSTEM, renderTranscript, type TranscriptStep } from "./prompts.js";
+import { buildConfirmKickoff, buildDeepKickoff, buildAuditKickoff, buildMapKickoff, buildSynthesisKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYNTHESIS_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_SYSTEM, renderTranscript, type TranscriptStep } from "./prompts.js";
 import { describeAction, type AgentTool, type ToolContext } from "./tools.js";
 
 // Provider-agnostic ReAct driver. It runs on top of the plain text-in/text-out
@@ -33,6 +33,8 @@ export async function runAuditLoop(input: {
   map?: boolean;
   /** Verify posture: confirm-or-refute ONE specific suspected finding (the claim text). */
   verify?: string;
+  /** Synthesis mode: compose per-scope deep-audit output into cross-component findings. */
+  synthesize?: string;
   /** Confirm mode: open-world reproduce/consolidate/decide over a prior run's findings (the seed text). */
   confirm?: string;
   /** Base backoff for transient-throttle retries; overridable for tests. */
@@ -43,7 +45,7 @@ export async function runAuditLoop(input: {
   // here so this legacy/mock loop cannot spin forever if a model never emits done; the
   // continuous pi-session driver (used for real runs) handles non-finite budgets natively.
   const maxSteps = Number.isFinite(input.maxSteps) ? input.maxSteps : 100000;
-  const systemPrompt = input.confirm ? AUDIT_CONFIRM_SYSTEM : input.verify ? AUDIT_VERIFY_SYSTEM : input.map ? MAP_SYSTEM : input.deep ? AUDIT_DEEP_SYSTEM : AUDIT_SYSTEM;
+  const systemPrompt = input.confirm ? AUDIT_CONFIRM_SYSTEM : input.synthesize ? AUDIT_SYNTHESIS_SYSTEM : input.verify ? AUDIT_VERIFY_SYSTEM : input.map ? MAP_SYSTEM : input.deep ? AUDIT_DEEP_SYSTEM : AUDIT_SYSTEM;
   const toolsByName = new Map(input.tools.map((tool) => [tool.name, tool]));
   const kickoffCommon = {
     target: input.cfg.targetName,
@@ -55,7 +57,9 @@ export async function runAuditLoop(input: {
   };
   const kickoff = input.confirm
     ? buildConfirmKickoff({ ...kickoffCommon, confirm: input.confirm })
-    : input.verify
+    : input.synthesize
+      ? buildSynthesisKickoff({ ...kickoffCommon, synthesize: input.synthesize })
+      : input.verify
       ? buildVerifyKickoff({ ...kickoffCommon, verify: input.verify })
       : input.map
         ? buildMapKickoff(kickoffCommon)
@@ -79,7 +83,7 @@ export async function runAuditLoop(input: {
     try {
       const raw = await input.llm.complete({
         tag: "audit_finalize",
-        system: AUDIT_SYSTEM,
+        system: systemPrompt,
         user: `${kickoff}\n\n===== TRANSCRIPT SO FAR =====\n${renderTranscript(steps)}\n\n===== FINALIZE =====\n${ask}`,
         model: input.cfg.auditModel,
         maxTokens: input.cfg.maxTokens,

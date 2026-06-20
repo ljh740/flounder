@@ -8,10 +8,10 @@ import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, ingestFindingsFromScratch, newSession, dedupeFindings } from "../dist/agent/tools.js";
 import { runAudit } from "../dist/agent/audit.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
-import { buildDeepKickoff, AUDIT_DEEP_SYSTEM } from "../dist/agent/prompts.js";
+import { buildDeepKickoff, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
 import { runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
-import { isPiSessionProvider, mapThinkingLevel } from "../dist/agent/pi-session.js";
+import { buildSessionPrompt, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapThinkingLevel, toolSchemas } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 
@@ -47,6 +47,24 @@ test("pi session preserves the configured xhigh thinking level", () => {
   assert.equal(defaultConfig().thinkingLevel, "xhigh");
   assert.equal(mapThinkingLevel("minimal"), "minimal");
   assert.equal(mapThinkingLevel("xhigh"), "xhigh");
+});
+
+test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session paths", () => {
+  assert.ok(POC_TRUST_RULE.includes("Build the PoC the way the ATTACKER would"));
+  assert.ok(POC_TRUST_RULE.includes("you may create local tests/harnesses"), "rule should allow constructing real local attack scenarios");
+
+  for (const prompt of [AUDIT_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_VERIFY_SYSTEM]) {
+    assert.ok(prompt.includes(POC_TRUST_RULE), "legacy loop prompt is missing the shared PoC trust rule");
+  }
+
+  const sessionPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs" });
+  assert.ok(sessionPrompt.includes(POC_TRUST_RULE), "real pi session prompt is missing the shared PoC trust rule");
+  assert.ok(sessionPrompt.includes('purpose="build"'), "real pi session prompt should expose build-purpose commands");
+  assert.ok(JSON.stringify(toolSchemas.bash).includes('"build"'), "pi custom tool schema should allow purpose=build");
+  assert.ok(FINDINGS_FINALIZE_PROMPT.includes("already ran a purpose=confirm command that passed"), "finalize should preserve already-executed confirmations");
+
+  const mapPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", map: true });
+  assert.ok(!mapPrompt.includes("Record candidates by writing findings.json"), "map prompt should not inherit findings-report instructions");
 });
 
 test("project memory persists notes and recalls by keyword overlap", async () => {
@@ -163,6 +181,37 @@ test("read, write, edit, and bash operate on loaded material and the copied work
     assert.match(run.observation, /CONFIRMATION-ELIGIBLE PASS/);
     assert.equal(ctx.session.commandRuns.length, 1);
     assert.equal(ctx.session.commandRuns[0].passed, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("prepare/confirm report files may cite public URLs while generated PoC files stay guarded", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.sourcePaths = [fixtures];
+    const logger = await tempLogger(dir);
+    const ctx = { cfg, source: [], corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session: newSession() };
+
+    const prepare = await tool("write").run({
+      path: "prepare_manifest.json",
+      content: JSON.stringify({ components: [{ source: "repo@commit", where: "https://example.com/repo" }] }),
+    }, ctx);
+    assert.match(prepare.observation, /wrote prepare_manifest\.json/);
+
+    const confirm = await tool("write").run({
+      path: "confirm_decision.json",
+      content: JSON.stringify([{ bug: "x", novelty: "already-disclosed: https://example.com/advisory" }]),
+    }, ctx);
+    assert.match(confirm.observation, /wrote confirm_decision\.json/);
+
+    const poc = await tool("write").run({
+      path: "exploit.test.mjs",
+      content: "fetch('https://mainnet.example/rpc');\n",
+    }, ctx);
+    assert.match(poc.observation, /blocked/i);
+    assert.match(poc.observation, /remote URLs/i);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -366,6 +415,49 @@ test("forced finalize: a run that never writes findings.json still captures hypo
     assert.equal(ingest.parsed, 1);
     assert.equal(session.findings[0].confirmationStatus, "suspected");
     assert.match(session.findings[0].title, /Residual suspicion/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy loop uses the synthesis prompt instead of falling back to breadth audit", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    const logger = await tempLogger(dir);
+    const session = newSession();
+    const ctx = {
+      cfg,
+      source: [{ path: "x.rs", kind: "source", content: "line1\n" }],
+      corpus: [],
+      memory: new ProjectMemory(path.join(dir, "memory.jsonl")),
+      logger,
+      session,
+    };
+    const calls = [];
+    const llm = {
+      async complete(input) {
+        calls.push(input);
+        if (input.tag === "audit_finalize") return "[]";
+        assert.match(input.system, /SYNTHESIS mode/);
+        assert.match(input.user, /sink-driven synthesis/i);
+        assert.match(input.user, /PER-SCOPE FINDINGS/);
+        return JSON.stringify({ thought: "synthesis complete", done: true, summary: "done" });
+      },
+    };
+
+    const result = await runAuditLoop({
+      cfg,
+      llm,
+      tools: buildTools(),
+      ctx,
+      logger,
+      maxSteps: 3,
+      fileManifest: "x.rs",
+      synthesize: "PER-SCOPE FINDINGS\n- suspected link reaches sink",
+    });
+    assert.equal(result.stoppedReason, "finished");
+    assert.ok(calls.some((call) => call.system.includes("SYNTHESIS mode")), "synthesis system prompt should be used");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
