@@ -208,7 +208,9 @@ export function ingestFindingsFromScratch(session: AgentSession): { parsed: numb
       exploitSketch: asString(record.exploit_sketch) ?? asString(record.exploitSketch) ?? "",
       fix: asString(record.fix) ?? "",
       confidence: clampFloat(record.confidence, 0, 1, 0.5),
-      confirmationStatus: confirmed ? "confirmed-executable" : "suspected",
+      // The dig records a checked-and-satisfied obligation by prefixing its title "DISCHARGED:".
+      // Map that to the discharged status so it is not lumped into the suspected (lead) bucket.
+      confirmationStatus: confirmed ? "confirmed-executable" : title && DISCHARGE_TITLE.test(title) ? "discharged" : "suspected",
       ...(confirmed && citedRun ? { commandRunId: citedRun.id } : {}),
       ...(fixPatch ? { fixPatch } : {}),
       ...(asStringList(record.patched_success_patterns ?? record.patchedSuccessPatterns).length > 0
@@ -555,7 +557,11 @@ export function readScratchScopes(session: AgentSession): AuditScope[] {
   return scopes.sort((a, b) => b.score - a.score);
 }
 
+// A satisfied-and-checked obligation; "DISCHARGED:" title -> discharged status (the model marks it).
+const DISCHARGE_TITLE = /^(obligation\s+)?discharged\b/i;
+
 const CONFIRMATION_RANK: Record<string, number> = {
+  discharged: -1, // below suspected: if dig samples disagree, a suspicion (possible bug) beats a discharge (safe)
   suspected: 0,
   "confirmed-source": 1,
   "confirmed-executable": 2,

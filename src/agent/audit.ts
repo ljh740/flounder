@@ -12,7 +12,7 @@ import type { AuditSummary, ConfirmationStatus, Doc, LlmClient, RankedFinding, S
 import { publicPath } from "../util/paths.js";
 import { listWorkspaceFiles, normalizeRelativePath, prepareSandboxWorkspace, writeSandboxFiles, type SandboxWorkspace } from "../security/sandbox.js";
 import { runDifferentialConfirmation, type DifferentialResult } from "./differential.js";
-import { runRefutation } from "./refutation.js";
+import { runDischargeChallenge, runRefutation } from "./refutation.js";
 import { runAuditLoop } from "./loop.js";
 import { ProjectMemory } from "./memory.js";
 import { loadScopeInventory, saveScopeInventory, scopeProgress } from "./scope-store.js";
@@ -552,6 +552,37 @@ export async function runAudit(
       }
     }
     recorder.findings(session.findings, logger.runDir, "refutation"); // push refutation downgrades (suspected/refuted) to the UI
+  }
+
+  // Discharge challenge (the false-negative guard, symmetric to the refutation skeptic above): the
+  // dig records many obligations as DISCHARGED, and a wrong discharge is otherwise a silent miss
+  // with no review. An independent skeptic re-examines the highest-stakes discharges and tries to
+  // BREAK each; an UNSOUND discharge is RE-OPENED as a suspected candidate (high severity) so it
+  // flows on to verify like any other suspicion. General method — it challenges the discharge
+  // reasoning, never a specific bug shape.
+  if (cfg.auditChallengeDischarges !== false && !options.signal?.aborted) {
+    const sevRank = (s: string | undefined): number => ({ critical: 0, high: 1, medium: 2, low: 3, info: 4 } as Record<string, number>)[s ?? "info"] ?? 4;
+    const discharged = session.findings.filter((f) => f.confirmationStatus === "discharged").sort((a, b) => sevRank(a.severity) - sevRank(b.severity));
+    if (discharged.length > 0) {
+      const challengeCfg = withRole(cfg, "refute");
+      const challengeLlm = options.llm ?? (isPiSessionProvider(challengeCfg.provider) ? new SessionLlmClient(challengeCfg, logger) : createLlmClient(challengeCfg, logger));
+      await logger.event("audit_discharge_challenge_start", { discharged: discharged.length });
+      const verdicts = await runDischargeChallenge({ findings: discharged, source, cfg: challengeCfg, llm: challengeLlm, logger, max: cfg.auditChallengeMax ?? 12, onProgress: (id) => options.onActivity?.({ kind: "step", tool: `challenge ${id}` }) });
+      let overturned = 0;
+      for (const v of verdicts) {
+        if (!v.unsound) continue;
+        const finding = session.findings.find((x) => x.id === v.findingId);
+        if (!finding) continue;
+        finding.confirmationStatus = "suspected"; // no longer "safe" — re-open as a real lead (flows to verify)
+        finding.title = "DISCHARGE OVERTURNED: " + (finding.title || "").replace(/^(obligation\s+)?discharged:?\s*/i, "");
+        finding.description = `An independent discharge-skeptic overturned this discharge — the cited enforcement does not clear the obligation end-to-end. Missed case: ${v.gap || v.reason}\n\n[original discharge reasoning] ${finding.description || ""}`.slice(0, 4000);
+        if (sevRank(finding.severity) > 1) finding.severity = "high"; // a real missed obligation is not info-level
+        overturned += 1;
+      }
+      if (verdicts.length > 0) await logger.artifact("audit_discharge_challenge.json", verdicts);
+      await logger.event("audit_discharge_challenge_done", { challenged: verdicts.length, overturned });
+      if (overturned > 0) recorder.findings(session.findings, logger.runDir, "discharge-challenge");
+    }
   }
 
   // Hard artifact semantics: only an execution-confirmed candidate is a finding.

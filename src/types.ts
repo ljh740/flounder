@@ -3,7 +3,9 @@ export type ExplorationStrategy = "breadth" | "depth" | "hybrid";
 export type ContextRetrievalMode = "source-index" | "source-index+qmd";
 export type ReproductionMode = "off" | "plan" | "execute";
 export type ScopeMode = "augment" | "restrict";
-export type ConfirmationStatus = "suspected" | "confirmed-source" | "confirmed-executable" | "confirmed-differential";
+// "discharged" = an obligation the dig CHECKED and judged satisfied (safe, not a bug). It is not a
+// suspicion and not a confirmed bug — its own status so it stops inflating the "suspected" count.
+export type ConfirmationStatus = "suspected" | "discharged" | "confirmed-source" | "confirmed-executable" | "confirmed-differential";
 export type VerificationVerdict = "confirmed" | "needs-investigation" | "false-positive";
 
 export type BuiltInFailureMode =

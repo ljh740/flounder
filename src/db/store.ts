@@ -23,7 +23,7 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
 export type RunKind = "run" | "map" | "audit" | "verify" | "confirm" | "prepare";
 export type RunStatus = "running" | "done" | "error" | "killed";
 export type ScopeStatus = "pending" | "audited" | "deferred" | "auditing";
-export type FindingStatus = "suspected" | "confirmed-executable" | "confirmed-differential" | "refuted";
+export type FindingStatus = "suspected" | "discharged" | "confirmed-executable" | "confirmed-differential" | "refuted";
 
 export interface ProjectInput {
   name: string;

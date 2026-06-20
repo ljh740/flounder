@@ -52,6 +52,11 @@ export interface AuditorConfig {
   // After the per-scope dig, run one cross-scope SYNTHESIS pass (sink-driven composition) to find
   // bugs that only exist in the COMPOSITION of components. Default on for map→dig; set false to skip.
   auditSynthesize?: boolean;
+  // Challenge DISCHARGED obligations with an independent skeptic (the false-negative guard,
+  // symmetric to refutation); an unsound discharge is re-opened as a candidate. Default on.
+  auditChallengeDischarges?: boolean;
+  // Cap on how many discharges the challenge reviews per run (highest-severity first).
+  auditChallengeMax?: number;
   // `flounder map`: run only the MAP phase (enumerate + persist the scope inventory) and
   // stop — no dig. The resumable `flounder audit` then digs from the persisted inventory.
   auditMapOnly: boolean;
