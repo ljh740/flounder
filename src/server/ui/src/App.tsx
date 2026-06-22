@@ -2694,11 +2694,14 @@ function ProvidersPane({ providers, onRefresh }: { providers: ProviderProfile[];
           <Button variant="primary" icon="package" onClick={() => { setCreating(true); setEditing(null); setError(""); }}>New Provider</Button>
         </div>
       </div>
-      <div className="info-panel">
-        <strong>Authentication lives on each daemon.</strong>
+      <details className="info-panel executor-setup">
+        <summary>
+          <strong>Authentication lives on each daemon.</strong>
+          <small>Provider login and check commands</small>
+        </summary>
         <span>Run <code>flounder daemon provider login &lt;provider&gt;</code> on every executor machine, or start <code>flounder daemon start</code> with that provider's required environment variables. The server stores provider/model choices only, never API keys.</span>
         <code>flounder daemon provider check openai-codex</code>
-      </div>
+      </details>
       {error ? <div className="inline-error">{error}</div> : null}
       {creating || editing ? (
         <ProviderForm
