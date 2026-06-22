@@ -245,6 +245,7 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
   let stderr = "";
   let timedOut = false;
   let exitCode: number | null = null;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
   const child = spawn(input.program, input.args, {
     cwd: input.cwd,
     shell: false,
@@ -253,6 +254,9 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill("SIGTERM");
+    killTimer = setTimeout(() => {
+      if (exitCode === null) child.kill("SIGKILL");
+    }, 2_000);
   }, input.timeoutMs);
 
   child.stdout?.on("data", (chunk) => {
@@ -273,6 +277,7 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
     });
   });
   clearTimeout(timer);
+  if (killTimer) clearTimeout(killTimer);
   return { stdout, stderr, exitCode, timedOut };
 }
 

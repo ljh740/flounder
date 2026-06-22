@@ -87,6 +87,31 @@ test("sandbox host backend is explicit and still uses isolated HOME and caches",
   }
 });
 
+test("sandbox timeouts kill processes that ignore SIGTERM", async () => {
+  const workspace = await tempDir("flounder-sandbox-timeout-");
+  try {
+    const started = Date.now();
+    const result = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+        timeoutMs: 100,
+      },
+      workspace,
+      4000,
+      [],
+      undefined,
+      { backend: "host", allowHostFallback: true, network: "none" },
+    );
+
+    assert.equal(result.timedOut, true);
+    assert.equal(result.exitCode, null);
+    assert.equal(Date.now() - started < 5000, true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("sandbox PATH includes common host toolchain directories", () => {
   const toolPath = sandboxToolPath("/usr/bin");
   const parts = toolPath.split(path.delimiter);
