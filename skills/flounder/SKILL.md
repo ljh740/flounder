@@ -159,6 +159,8 @@ confirm the skill is discoverable before installing.
    - current phase: prepare, map, dig, confirm
    - live activity: `GET /api/runs/:id/log`
    - project state: `GET /api/projects/:uuid`
+   - prepare quality: `prepareSummary.quality` is `ready`, `preparing`,
+     `needs-review`, `missing`, or `invalid`
    - findings: `GET /api/projects/:uuid/findings`
    - confirm decisions: `GET /api/projects/:uuid/confirm-decisions`
 
@@ -209,6 +211,9 @@ Open only the references needed for the current task:
 - Run is queued and no daemon can claim it: check the project's selected daemon.
 - Run is running: watch `GET /api/runs/:id/log` and the project phase, not only
   aggregate counts.
+- Prepare quality is `needs-review`, `missing`, or `invalid`: read
+  `prepareSummary.issues`, `gaps`, and `realTarget` before trusting the source
+  set or launching more expensive work.
 - Map is done but many high-score scopes are pending: continue the audit or
   prioritize scopes.
 - Findings are only `suspected`: make the target buildable and run verify or
@@ -250,6 +255,8 @@ The task is not complete until the agent can report:
 - Every selected provider profile is authenticated on the daemon.
 - The project has source paths, a build root, and corpus paths appropriate for
   the requested audit.
+- Prepared materials are `ready`, or every `needs-review` issue/gap is called
+  out as a known limitation.
 - The audit run reached a terminal state or a meaningful blocker.
 - Scope coverage is summarized: mapped, audited, pending, deferred.
 - Findings are grouped by status.

@@ -170,7 +170,7 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "GET", path: "/api/projects/:uuid",
-    summary: "Project detail: config, prepare-material summary, scope coverage, finding/run/confirmed counts, recent runs, confirm decisions.",
+    summary: "Project detail: config, prepare-material summary (prepareSummary.quality = ready|preparing|needs-review|missing|invalid), scope coverage, finding/run/confirmed counts, recent runs, confirm decisions.",
     params: { uuid: "project UUID" },
     handler: projectGet,
   }),
@@ -205,7 +205,7 @@ const ROUTES: Route[] = [
       region: "string? — audit: pinned region e.g. src/Foo.sol:120-180", scope: "string? — audit: scope id(s)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution; project finding rows with id are linked back to that original row",
       allowMaterialDrift: "boolean? — expert override for verifyFindings when a newer Prepare run changed project materials after the selected findings were produced",
       scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run; standard means audit until the project has 30 audited scopes",
-      maxScopes: "number? — one-off per-run scope cap, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", digSteps: "number? — one-off per-scope dig turn cap",
+      maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", digSteps: "number? — one-off per-scope dig turn cap",
       maxSteps: "number? — one-off global turn cap", digSamples: "number? — one-off samples per scope", digConcurrency: "number? — one-off parallel scopes",
       findingId: "number? — confirm/report: reproduce or report one selected finding",
       findingIds: "number[]? — confirm/report: reproduce selected pending audit-confirmed findings, or generate formal reports for selected reproduced findings",
