@@ -196,7 +196,9 @@ test("daemon: full job handoff — enqueue → claim → run start → ingest �
     assert.equal(findings.findings[0].status, "confirmed-differential");
     assert.deepEqual(findings.findings[0].timeline.map((e) => e.to_status), ["suspected", "confirmed-differential"]);
     const detail = await j(await ui(base, "GET", projectPath));
-    assert.equal(detail.confirmedBugs, 1); // reproduced=yes surfaced as a confirmed bug
+    assert.equal(detail.auditConfirmedFindings, 1);
+    assert.equal(detail.reproducedBugs, 1);
+    assert.equal(detail.confirmedBugs, 1); // legacy alias for reproduced=yes
 
     // Daemon finishes the run; status + final coverage/finding-count persist.
     await asDaemon(base, token, "POST", `/api/daemon/jobs/${launch.jobId}/status`, { status: "done" });

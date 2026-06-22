@@ -664,12 +664,16 @@ function projectGet(c: Ctx): void {
     const progress = storedProgress.total > 0 ? storedProgress : scopeCheckpoint?.progress ?? storedProgress;
     const allFindings = reportableFindings(c.store.listFindings(id));
     const findingSummaries = allFindings.map(findingSummaryRow);
+    const auditConfirmedFindings = countAuditConfirmedFindings(allFindings);
+    const reproducedBugs = c.store.countConfirmedBugs(id);
     sendJson(c.res, 200, {
       project,
       progress,
       statusCounts: findingCounts(allFindings),
       findingsTotal: allFindings.length,
-      confirmedBugs: c.store.countConfirmedBugs(id),
+      auditConfirmedFindings,
+      reproducedBugs,
+      confirmedBugs: reproducedBugs,
       runs,
       runsTotal: c.store.countRuns(id),
       confirmDecisions: c.store.listConfirmDecisions(id),
@@ -1265,6 +1269,10 @@ function isConfirmedFindingStatus(status: string): boolean {
   return status === "confirmed-source" || status === "confirmed-executable" || status === "confirmed-differential";
 }
 
+function countAuditConfirmedFindings(rows: Array<Record<string, unknown>>): number {
+  return rows.filter((row) => isConfirmedFindingStatus(String(row.status ?? "").toLowerCase())).length;
+}
+
 const FINDING_STATUS_RANK: Record<string, number> = {
   discharged: 0,
   refuted: 1,
@@ -1802,6 +1810,7 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
   return store.listProjects().map((project) => {
     const id = Number(project.id);
     const findings = reportableFindings(store.listFindings(id));
+    const reproducedBugs = store.countConfirmedBugs(id);
     return {
       id,
       uuid: project.uuid,
@@ -1813,7 +1822,9 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
       progress: store.scopeProgress(id),
       findingCounts: findingCounts(findings),
       findingsTotal: findings.length,
-      confirmedBugs: store.countConfirmedBugs(id),
+      auditConfirmedFindings: countAuditConfirmedFindings(findings),
+      reproducedBugs,
+      confirmedBugs: reproducedBugs,
       runCount: store.countRuns(id),
       latestRun: store.latestRun(id) ?? null,
       activeRuns: activeByTarget.get(String(project.name)) ?? 0,

@@ -521,6 +521,8 @@ test("api: info-only audit ledgers are hidden from actionable findings", async (
     const detail = await json(await fetch(base + projectPath));
     assert.equal(detail.findingsTotal, 1);
     assert.deepEqual(detail.statusCounts, { suspected: 1 });
+    assert.equal(detail.auditConfirmedFindings, 0);
+    assert.equal(detail.reproducedBugs, 0);
     assert.deepEqual(detail.allFindings.map((finding) => finding.finding_key), ["bug"]);
     assert.equal("evidence" in detail.allFindings[0], false, "project overview should use lightweight finding summaries");
 
@@ -574,6 +576,8 @@ test("api: duplicate findings from different scopes collapse to one user-facing 
     const detail = await json(await fetch(base + projectPath));
     assert.equal(detail.findingsTotal, 1);
     assert.deepEqual(detail.statusCounts, { "confirmed-executable": 1 });
+    assert.equal(detail.auditConfirmedFindings, 1);
+    assert.equal(detail.reproducedBugs, 0);
     assert.equal(detail.allFindings[0].status, "confirmed-executable");
     assert.equal(detail.allFindings[0].scope_id, "SCOPE-B");
 

@@ -26,6 +26,8 @@ export interface ProjectSnapshot {
   progress?: Coverage;
   findingCounts?: Record<string, number>;
   findingsTotal?: number;
+  auditConfirmedFindings?: number;
+  reproducedBugs?: number;
   confirmedBugs?: number;
   activeRuns?: number;
   latestRun?: RunRow | null;
@@ -120,6 +122,8 @@ export interface ProjectDetail {
   progress: Coverage;
   statusCounts: Record<string, number>;
   findingsTotal: number;
+  auditConfirmedFindings: number;
+  reproducedBugs: number;
   confirmedBugs: number;
   runs: RunRow[];
   runsTotal: number;
