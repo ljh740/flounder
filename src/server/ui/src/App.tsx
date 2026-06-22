@@ -1836,11 +1836,13 @@ function prepareMaterialsAttention(summary?: PrepareSummary | null): { tone: "wa
   const count = issues + gaps + manifestMissing + manifestPartial;
   if (count <= 0) return null;
   if (summary.quality === "limited") {
-    return { tone: "warn", label: `Prepared materials have automation limits: ${plural(count, "note")}` };
+    return { tone: "warn", label: `Prepared materials are usable with caveats: ${plural(count, "note")}` };
   }
   return {
     tone: summary.quality === "missing" ? "pending" : "warn",
-    label: `Prepared materials need review: ${plural(count, "issue")}`,
+    label: summary.quality === "needs-review"
+      ? `Prepared materials are blocked: ${plural(count, "issue")}`
+      : `Prepared materials need attention: ${plural(count, "issue")}`,
   };
 }
 
@@ -2114,18 +2116,18 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
   const qualityLabel = summary.quality === "ready"
     ? "Ready for sealed audit"
     : summary.quality === "limited"
-      ? "Ready with limits"
-    : summary.quality === "preparing"
-      ? "Preparing materials"
-      : summary.quality === "missing"
-        ? "Prepare output missing"
-        : summary.quality === "invalid"
-          ? "Prepare output invalid"
-          : needsReview
-            ? "Needs review"
-            : manifestReady
-              ? "Ready for sealed audit"
-              : "Preparing materials";
+      ? "Usable with caveats"
+      : summary.quality === "preparing"
+        ? "Preparing materials"
+        : summary.quality === "missing"
+          ? "Prepare output missing"
+          : summary.quality === "invalid"
+            ? "Prepare output invalid"
+            : needsReview
+              ? "Blocked materials"
+              : manifestReady
+                ? "Ready for sealed audit"
+                : "Preparing materials";
   const workspace = summary.workspace ?? {};
   const filesLabel = workspace.filesTruncated ? `${(workspace.files ?? 0).toLocaleString()}+` : (workspace.files ?? 0).toLocaleString();
   const scopeDeclaration = readableScopeDeclaration(summary.scopeDeclaration);
@@ -3479,12 +3481,23 @@ function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError 
     }
     onUpdateRunTarget(running, Math.floor(target));
   };
+  const prepareQuality = detail.prepareSummary?.quality;
+  const prepareActionLabel = prepareQuality === "ready"
+    ? "Refresh materials"
+    : prepareQuality === "limited"
+      ? "Improve materials"
+      : prepareQuality === "needs-review" || prepareQuality === "invalid"
+        ? "Repair materials"
+        : "Prepare materials";
+  const prepareActionDetail = prepareQuality === "limited"
+    ? "Optionally re-run Prepare to close provenance, deployment-match, or real-target caveats. The current materials can still drive Map/Dig."
+    : "Acquire official source/docs, pin provenance, and record material or real-target gaps before sealed auditing.";
   const options: Array<{ verb: LaunchAction; label: string; detail: string; disabled?: boolean }> = [
     { verb: "run", label: "Continue audit", detail: "Prepare if needed, map scopes if needed, then dig the next batch.", disabled: locked },
     {
       verb: "prepare",
-      label: detail.prepareSummary?.quality === "ready" ? "Refresh materials" : "Resolve materials",
-      detail: "Re-run Prepare to acquire official source/docs, pin provenance, and close material or real-target gaps before sealed auditing.",
+      label: prepareActionLabel,
+      detail: prepareActionDetail,
       disabled: locked,
     },
     { verb: "map", label: "Map scopes only", detail: "Build or refresh the scope inventory without digging.", disabled: locked },

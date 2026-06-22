@@ -954,6 +954,66 @@ test("api: unresolved prepare manifest status is surfaced as limited materials",
   });
 });
 
+test("api: nonstandard terminal prepare status remains automatable as limited materials", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "nonstandard-prepare-status" }));
+    const runDir = path.join(out, "nonstandard-prepare-status-run");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(path.join(workspace, "source"), { recursive: true });
+    await writeFile(path.join(workspace, "source", "README.md"), "official source snapshot\n");
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "verified_with_notes",
+        posture: "blind",
+        answer_firewall: "clean",
+        real_target: {
+          requires_confirmation: false,
+          mode: "source-only",
+          reason: "This target is source-only; no deployed target is in scope.",
+          ground_truth: [],
+          confirm_guidance: {
+            required: false,
+            allowed_network_actions: "none",
+            recommended_method: "Run local source-level checks only.",
+            not_required_reason: "No deployed target is in scope.",
+          },
+        },
+        components: [
+          {
+            identity: "source/package",
+            platform: "none",
+            revision: "v1.0.0",
+            source: "repo@tag",
+            staged_path: "source",
+            in_scope: true,
+            match: "n/a",
+          },
+        ],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.equal(detail.prepareSummary.quality, "limited");
+    assert.equal(detail.prepareSummary.manifestState, "verified_with_notes");
+    assert.match(detail.prepareSummary.issues.join("\n"), /prepare manifest status is verified_with_notes/);
+
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run" }));
+    assert.equal(launched.queued, true);
+  });
+});
+
 test("api: blind prepare manifests get a clean answer-firewall fallback", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

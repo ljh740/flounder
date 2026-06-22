@@ -982,7 +982,6 @@ function prepareSummaryQuality(input: {
   if (input.manifestStatus === "missing") return input.runStatus === "running" ? "preparing" : "missing";
   if (input.runStatus === "running") return "preparing";
   const state = input.manifestState.trim().toLowerCase();
-  if (state && !["ready", "done", "complete", "completed", "verified", "partial"].includes(state)) return "needs-review";
   if (input.issues.some(isBlockingPrepareIssue)) return "needs-review";
   if (state === "partial" || input.issues.length > 0 || input.gaps.length > 0) return "limited";
   return "ready";
