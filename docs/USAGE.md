@@ -264,7 +264,7 @@ The easiest way to use Flounder with Codex, Claude Code, or another local coding
 Audit this repository with Flounder.
 ```
 
-After installing the skill with `npx skills add . --skill flounder -g`, agents should trigger it from natural requests about Flounder audits, authorized source review, smart-contract or ZK audit work, daemon/provider setup, verifying suspected findings, confirming real findings, or collecting execution-backed bug reports. The skill is the agent operating manual: it covers setup, daemon-local provider auth, projects, provider profiles, runs, live activity, next-action decisions, confirm, and final bug packages.
+After installing the skill with `npx skills add . --skill flounder -g -a codex -a claude-code`, agents should trigger it from natural requests about Flounder audits, authorized source review, smart-contract or ZK audit work, daemon/provider setup, verifying suspected findings, confirming real findings, or collecting execution-backed bug reports. The skill is the agent operating manual: it covers setup, daemon-local provider auth, projects, provider profiles, runs, live activity, next-action decisions, confirm, and final bug packages.
 
 ## Outputs
 

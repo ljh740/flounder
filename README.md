@@ -22,7 +22,7 @@ The important distinction is that Flounder is not a scanner for one stack, a che
 Install the skill once:
 
 ```bash
-npx skills add . --skill flounder -g
+npx skills add . --skill flounder -g -a codex -a claude-code
 ```
 
 Then ask Codex, Claude Code, or another skills-aware agent naturally:

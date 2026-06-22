@@ -24,17 +24,21 @@ policy, run tracking, live activity, and execution gates.
 
 ## Install This Skill
 
-Install from this repository with the `skills` CLI:
+Install from this repository with the `skills` CLI. The recommended install
+targets Codex and Claude Code explicitly, avoiding unsupported global targets:
+
+```bash
+npx skills add . --skill flounder -g -a codex -a claude-code
+```
+
+To ask the installer to try every supported agent:
 
 ```bash
 npx skills add . --skill flounder -g
 ```
 
-To install only for specific agents:
-
-```bash
-npx skills add . --skill flounder -g -a claude-code -a codex
-```
+Some agents do not support global skill installation; the targeted command
+above is the clean path for Codex/Claude Code users.
 
 Use `npx skills add . --skill flounder --list` from the repository root to
 confirm the skill is discoverable before installing.
