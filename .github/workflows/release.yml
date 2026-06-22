@@ -45,6 +45,9 @@ jobs:
       - name: Build and test
         run: npm test
 
+      - name: API catalog contract
+        run: npm run check:api-catalog:dist
+
       - name: Public-surface scan
         run: npm run check:public
 

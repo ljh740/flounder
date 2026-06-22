@@ -85,8 +85,9 @@ test("pi extension blocks live-network exploit-like bash commands", async () => 
 // truncating a pi-tool-driven map/dig audit. Pin the helper used by the tools.
 test("flounder_run defaults to UNBOUNDED map/dig/breadth budgets (matches the `flounder run` CLI)", () => {
   const base = defaultConfig();
-  // the base config is deliberately finite and small; the unbounded default is layered on top
-  assert.ok(Number.isFinite(base.auditMapSteps) && Number.isFinite(base.auditDigSteps));
+  assert.equal(base.auditMaxSteps, Number.POSITIVE_INFINITY);
+  assert.equal(base.auditMapSteps, Number.POSITIVE_INFINITY);
+  assert.equal(base.auditDigSteps, Number.POSITIVE_INFINITY);
 
   const cfg = defaultConfig();
   applyFsaRunBudgets(cfg, undefined);

@@ -79,10 +79,10 @@ Start the local product surface:
 ```bash
 flounder ui                 # dashboard + control plane at http://127.0.0.1:4500
 flounder ui --no-daemon     # control plane only
-flounder daemon --server http://<server>:4500 --token <token>   # remote executor
+flounder daemon start --server http://<server>:4500 --token <token>   # remote executor
 ```
 
-For live model runs, configure provider credentials on each daemon machine. Subscription/OAuth providers use `flounder daemon provider login <provider>`; API-key providers can be supplied through the daemon process environment or local secret manager. Check a machine with `flounder daemon provider check <provider>`. The server stores provider profiles and routes jobs, but provider credentials stay on the daemon. Do not commit credentials, local environment files, private corpora, or machine-specific paths.
+For live model runs, configure provider credentials on each daemon machine. Subscription/OAuth providers use `flounder daemon provider login <provider>`; API-key providers can be supplied through the daemon process environment or local secret manager. Check a machine with `flounder daemon provider check <provider>`. For `openai-codex`, an agent can trigger user auth by running `flounder daemon provider login openai-codex`; the command prints a browser URL or device-code instructions for the user to complete, then saves daemon-local auth. If `~/.pi/agent/auth.json` already has the same provider, Flounder imports that provider entry into `~/.flounder/agent/auth.json` on login/check. The server stores provider profiles and routes jobs, but provider credentials stay on the daemon. Do not commit credentials, local environment files, private corpora, or machine-specific paths.
 
 ## Execution Sandbox
 
@@ -126,7 +126,7 @@ CLI layout is intentionally split by where the command runs:
 
 - **Workflow verbs stay top-level.** Examples: `flounder prepare`, `flounder run`, `flounder map`, `flounder audit`, `flounder confirm`.
 - **Server/control-plane resources live under `flounder server ...`.** Examples: `flounder server project list`, `flounder server run list`, `flounder server finding list`, `flounder server daemon list`, `flounder server daemon-token mint`.
-- **Daemon-machine local operations live under `flounder daemon ...`.** Examples: `flounder daemon --server ... --token ...`, `flounder daemon provider login openai-codex`, `flounder daemon provider check openai-codex`.
+- **Daemon-machine local operations live under `flounder daemon ...`.** Examples: `flounder daemon start --server ... --token ...`, `flounder daemon provider login openai-codex`, `flounder daemon provider check openai-codex`.
 
 Resource commands use the same noun/action style everywhere: `flounder server finding list` reads the global finding index, `flounder server run list` reads global run history, `flounder server daemon-token mint` creates a daemon connection token on the control plane, and `flounder daemon provider list|login|check` manages provider auth on the daemon machine. The SQLite file is an implementation detail, so `db` is not part of the public CLI vocabulary.
 
@@ -151,7 +151,7 @@ For a real audit, use the dashboard flow:
 
 1. Start `flounder ui`.
 2. Create or connect an execution daemon.
-3. Authenticate the daemon's provider with `flounder daemon provider login openai-codex` and verify with `flounder daemon provider check openai-codex`.
+3. Authenticate the daemon's provider with `flounder daemon provider login openai-codex` and verify with `flounder daemon provider check openai-codex`. This is the command an agent should run when it needs the user to complete OpenAI Codex auth.
 4. Create a provider profile that selects provider, model, and thinking level.
 5. Create a project, select its execution daemon and default provider profile, add source/build/corpus paths, and start a run.
 
@@ -168,7 +168,7 @@ flounder run \
 - Set `--build-root` so the dig can execution-confirm — without it you only get `suspected` findings.
 - Give generous budgets and **do not interrupt a dig**; a decisive obligation can surface late in its step budget.
 - `--dig-samples K` unions K independent passes (variance reduction); `--dig-concurrency N` digs N scopes in parallel; `--remap` re-enumerates. Reliability comes from coverage and repetition, not prompt tuning.
-- The codex provider (`openai-codex`) is the recommended autonomous path; each daemon needs a one-time `flounder daemon provider login openai-codex`.
+- The codex provider (`openai-codex`) is the recommended autonomous path; each daemon needs a one-time `flounder daemon provider login openai-codex` unless Flounder imports an existing pi auth entry for that provider.
 
 ## Confirmation ladder
 
@@ -198,7 +198,7 @@ npm run verify        # full local verification gate
 Confirm is **finding-grained and resumable**: each finding gets a real-target outcome (`reproduced` / `not-reproduced`), and a re-run skips the ones already decided. The CLI form confirms a whole run dir; from the dashboard you can **Confirm** a single finding or all pending findings of a project (it reproduces only what's still undecided — including findings added by a later `Continue audit`).
 
 ```bash
-flounder confirm ./runs/protocol-<timestamp> \
+flounder confirm ~/.flounder/protocol-<timestamp> \
   --source ./contracts --build-root . \
   --provider openai-codex
 ```
@@ -291,7 +291,9 @@ Run artifacts are private by default. Redact before sharing outside the trusted 
 
 ### Tracking Commands
 
-Every run records its metadata to a local tracking store at `<out>/flounder.db`: the project, the run lifecycle, scope coverage (mapped vs audited, updated live), findings and their status transitions (suspect → confirm → refute, on a timeline), and confirm decisions. It holds metadata and **paths** to the on-disk artifacts above, not their content. Inspect it across all projects without reading run dirs:
+Every run records its metadata to a local tracking store at `<out>/flounder.db`. The default `<out>` is `~/.flounder`, so a normal install keeps the tracking database at `~/.flounder/flounder.db`, run artifacts at `~/.flounder/<target>-<timestamp>/`, durable history/build cache at `~/.flounder/history/<target>/`, provider auth at `~/.flounder/agent/auth.json`, and the default daemon workspace at `~/.flounder/workspace`. Existing pi provider credentials can be imported from `~/.pi/agent/auth.json` into the Flounder auth file. System temp directories are reserved for short-lived scratch such as CLI subprocess working directories and inline verify payloads.
+
+The tracking store records the project, the run lifecycle, scope coverage (mapped vs audited, updated live), findings and their status transitions (suspect → confirm → refute, on a timeline), and confirm decisions. It holds metadata and **paths** to the on-disk artifacts above, not their content. Inspect it across all projects without reading run dirs:
 
 ```bash
 flounder server project list                    # every project: scope coverage, finding counts, latest run
@@ -310,14 +312,14 @@ This is the backend the dashboard reads from; it is written live by each run (no
 ```bash
 flounder ui                 # dashboard at http://127.0.0.1:4500 + a co-located executor daemon
 flounder ui --no-daemon     # control plane only — connect your own daemon(s) elsewhere
-flounder daemon --server http://<server>:4500 --token <token>   # run the executor on another machine
+flounder daemon start --server http://<server>:4500 --token <token>   # run the executor on another machine
 ```
 
 A web dashboard to track and drive audits across projects, updating live via SSE. A project is pinned to an **execution daemon** and a **default provider profile**. A provider profile is the model strategy: provider, model, thinking level, and optional role defaults. The project can also override the provider profile per phase (`prepare`, `map`, `dig`, `confirm`) when one phase needs a different model or reasoning level. The selected daemon must be authenticated for every provider profile the project can use.
 
 A project's detail is the **prepare → map → dig → confirm** workflow: it shows the current phase, elapsed phase timing, scope coverage, live model activity, and the scope being dug. Below it are the scope queue you can hand-order (`Top` pushes a scope to the front of the dig, separate from its score), findings that stream in as scopes land and change status through refutation, per-finding **Confirm** actions with real-target outcome (`reproduced` / `not-reproduced`), a project-wide **Confirm pending on real target**, and viewable Markdown reports. **Start/Continue** resumes an audit, **Restart** remaps from scratch, and **Stop** cooperatively cancels a running job. The cross-project **Findings** view tracks every finding and its submission state. Settings holds provider profiles and daemon CRUD (mint token, rename, revoke).
 
-Execution is **decoupled** from the dashboard: the `flounder ui` server is a **control plane** (REST API + SQLite + a job queue) and the audit runs on a **daemon**, so the target code and provider keys stay on the daemon's machine. `flounder ui` spawns a co-located daemon by default (rooted at `--workspace`, default `./workspace`); pass `--no-daemon` and run `flounder daemon` elsewhere (with a token from `flounder server daemon-token mint`) to execute on a different host. A project's materials are paths **relative to** its directory under the daemon's workspace, so nothing leaks an absolute path. The server binds to `127.0.0.1` by default; the daemon protocol is bearer-token-authenticated.
+Execution is **decoupled** from the dashboard: the `flounder ui` server is a **control plane** (REST API + SQLite + a job queue) and the audit runs on a **daemon**, so the target code and provider keys stay on the daemon's machine. `flounder ui` spawns a co-located daemon by default (rooted at `--workspace`, default `~/.flounder/workspace`) and reuses its local daemon identity across restarts, so projects pinned to the local executor keep claiming queued work. Pass `--no-daemon` and run `flounder daemon start` elsewhere (with a token from `flounder server daemon-token mint`) to execute on a different host. A project's materials are paths **relative to** its directory under the daemon's workspace, so nothing leaks an absolute path. The server binds to `127.0.0.1` by default; the daemon protocol is bearer-token-authenticated.
 
 ### HTTP API (agent-drivable)
 

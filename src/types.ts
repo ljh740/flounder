@@ -257,6 +257,8 @@ export interface RankedFinding {
   exploitSketch: string;
   fix: string;
   confirmationStatus: ConfirmationStatus;
+  commandRunId?: string;
+  patchedSuccessPatterns?: string[];
   verificationVerdict?: VerificationVerdict;
   reproductionStatus?: ReproductionStatus;
   impactScore?: number;

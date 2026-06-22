@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { AuditorConfig } from "../config.js";
-import { listWorkspaceFiles, prepareSandboxWorkspace } from "../security/sandbox.js";
+import { listWorkspaceFiles, prepareSandboxWorkspace, writeSandboxFiles } from "../security/sandbox.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { writeLastRunPointer } from "../trace/last-run.js";
 import { RunLogger } from "../trace/logger.js";
@@ -124,8 +124,14 @@ export async function runPrepare(
     ...(options.onActivity ? { onActivity: options.onActivity } : {}),
   });
 
-  const manifest = readPrepareManifest(session);
+  let manifest = readPrepareManifest(session);
   const validation = validatePrepareManifest(manifest, options.matchDeployed);
+  manifest = normalizePrepareManifest(manifest, validation);
+  if (manifest !== undefined) {
+    const content = `${JSON.stringify(manifest, null, 2)}\n`;
+    await writeSandboxFiles(workspace.absolute, [{ path: "prepare_manifest.json", content }]);
+    session.scratchFiles.set("prepare_manifest.json", content);
+  }
   await logger.artifact("prepare_manifest.json", manifest ?? { error: "no prepare_manifest.json written by the model", clue: options.clue });
   await logger.event("audit_prepare_done", {
     hasManifest: manifest !== undefined,
@@ -140,6 +146,25 @@ export async function runPrepare(
   recorder.finish(manifest !== undefined ? "done" : "error");
 
   return { runDir: logger.runDir, workspaceDir: workspace.absolute, manifest: manifest ?? null, validation };
+}
+
+export function normalizePrepareManifest(manifest: unknown, validation: PrepareValidation): unknown {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return manifest;
+  const row = manifest as Record<string, unknown>;
+  const current = typeof row.status === "string" ? row.status.trim().toLowerCase() : "";
+  if (["ready", "done", "complete", "completed", "verified", "partial"].includes(current)) return manifest;
+  const openGaps = hasOpenPrepareGaps(row);
+  const status = validation.issues.length > 0 || validation.unverified > 0 || openGaps ? "partial" : "complete";
+  return {
+    ...row,
+    status,
+    status_reason:
+      typeof row.status_reason === "string" && row.status_reason.trim()
+        ? row.status_reason
+        : status === "partial"
+          ? "prepare run ended with unresolved gaps or validation issues"
+          : "prepare run ended with staged neutral materials ready for sealed audit",
+  };
 }
 
 function readPrepareManifest(session: AgentSession): unknown {
@@ -199,6 +224,21 @@ function validatePrepareManifest(manifest: unknown, matchDeployed: boolean): Pre
     issues.push(`${out.unverified} deployed component(s) UNVERIFIED — staged source not proven to match the live code; the audit should treat each as a trust boundary`);
   }
   return out;
+}
+
+function hasOpenPrepareGaps(manifest: Record<string, unknown>): boolean {
+  const gaps = manifest.gaps;
+  if (!Array.isArray(gaps)) return false;
+  return gaps.some((gap) => {
+    if (gap === undefined || gap === null) return false;
+    if (typeof gap === "string") return gap.trim().length > 0;
+    if (typeof gap !== "object" || Array.isArray(gap)) return true;
+    const row = gap as Record<string, unknown>;
+    if (row.resolved === true) return false;
+    const status = typeof row.status === "string" ? row.status.trim().toLowerCase() : "";
+    if (["closed", "resolved", "complete", "completed", "done", "verified"].includes(status)) return false;
+    return true;
+  });
 }
 
 function historyLocation(cfg: AuditorConfig): { outputDir: string; targetName: string; historyDir?: string } {

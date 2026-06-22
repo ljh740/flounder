@@ -8,7 +8,7 @@ provider, API, budget, output, and pi extension details.
 | Surface | Use |
 | --- | --- |
 | `flounder ui` | Local control plane, dashboard, REST API, SQLite store, and optional co-located daemon |
-| `flounder daemon` | Execution plane that claims jobs, owns target source and provider credentials, and reports progress |
+| `flounder daemon start` | Execution plane that claims jobs, owns target source and provider credentials, and reports progress |
 | CLI verbs | Thin clients of the control plane; they enqueue tracked jobs and stream daemon activity |
 | REST API | Agent-drivable surface; start with `GET /api` |
 | pi extension | Registers `flounder_prepare`, `flounder_run`, `flounder_map`, `flounder_audit`, and `flounder_confirm` when loaded through pi |
@@ -19,21 +19,26 @@ provider, API, budget, output, and pi extension details.
 flounder ui                 # dashboard at http://127.0.0.1:4500 plus co-located daemon
 flounder ui --no-daemon     # control plane only
 flounder server daemon-token mint [name]
-flounder daemon --server http://<server>:4500 --token <token>
+flounder daemon start --server http://<server>:4500 --token <token>
 flounder daemon provider list
 flounder daemon provider login openai-codex
 flounder daemon provider check openai-codex
 ```
 
 Provider auth is daemon-local. The server stores provider profiles and queues
-jobs; the daemon executes jobs and owns credentials.
+jobs; the daemon executes jobs and owns credentials. For `openai-codex`, run
+`flounder daemon provider login openai-codex` to trigger the user-facing OAuth
+flow; the command prints a browser URL or device-code instructions. If pi
+already has `openai-codex` in `~/.pi/agent/auth.json`, Flounder imports that
+provider entry into `~/.flounder/agent/auth.json` on login/check.
 
 CLI naming convention:
 
 - Workflow verbs stay top-level: `flounder run`, `flounder map`, `flounder audit`, `flounder confirm`.
 - Server/control-plane resource commands live under `flounder server ...`.
 - `flounder daemon ...` commands run on the daemon machine and can touch local
-  provider auth, workspace paths, and executor settings.
+  provider auth, workspace paths, and executor settings. Start executors with
+  `flounder daemon start --server <url> --token <token>`.
 - Resource commands use noun/action form, matching provider commands:
   `flounder server finding list`, `flounder server run list`,
   `flounder server daemon-token mint`, and
@@ -139,9 +144,9 @@ Common agent calls:
 curl http://127.0.0.1:4500/api/projects
 curl http://127.0.0.1:4500/api/providers
 curl http://127.0.0.1:4500/api/daemons
-curl http://127.0.0.1:4500/api/projects/<name>
-curl http://127.0.0.1:4500/api/projects/<name>/findings
-curl http://127.0.0.1:4500/api/projects/<name>/confirm-decisions
+curl http://127.0.0.1:4500/api/projects/<uuid>
+curl http://127.0.0.1:4500/api/projects/<uuid>/findings
+curl http://127.0.0.1:4500/api/projects/<uuid>/confirm-decisions
 curl http://127.0.0.1:4500/api/runs/<id>/log
 ```
 
@@ -156,7 +161,8 @@ curl -X POST http://127.0.0.1:4500/api/projects \
 Starting a run:
 
 ```bash
-curl -X POST http://127.0.0.1:4500/api/projects/p/runs \
+PROJECT_UUID=<uuid-from-project-create-or-list>
+curl -X POST http://127.0.0.1:4500/api/projects/$PROJECT_UUID/runs \
   -H 'content-type: application/json' \
   -d '{"verb":"run"}'
 ```
@@ -184,6 +190,11 @@ Each confirm run writes:
 
 The tracking store records metadata and artifact paths; run artifacts remain
 private by default.
+
+Default local state is under `~/.flounder`: `flounder.db` for tracking,
+`history/` for durable memory/build cache, `agent/auth.json` for daemon-local
+provider auth, and `workspace/` for daemon project directories. System temp is
+only for short-lived scratch.
 
 ## Pi Extension
 

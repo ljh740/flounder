@@ -33,7 +33,7 @@ flounder server finding list --project evm-audit
 Confirm real candidates:
 
 ```bash
-flounder confirm runs/evm-audit-<timestamp> \
+flounder confirm ~/.flounder/evm-audit-<timestamp> \
   --source ./contracts --build-root .
 ```
 

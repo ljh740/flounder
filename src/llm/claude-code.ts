@@ -30,10 +30,12 @@ export class ClaudeCodeClient implements LlmClient {
     // autonomous-agent spawn. The system prompt is appended because the CLI exposes
     // `--append-system-prompt` (no replace flag); the appended instruction + disabled
     // tools is sufficient to get a single JSON action per turn.
+    const effort = claudeCodeEffort(input.thinkingLevel);
     const args = [
       "-p",
       "--model",
       input.model,
+      ...(effort ? ["--effort", effort] : []),
       "--append-system-prompt",
       system,
       "--output-format",
@@ -76,6 +78,13 @@ export class ClaudeCodeClient implements LlmClient {
       await rm(tmp, { recursive: true, force: true });
     }
   }
+}
+
+function claudeCodeEffort(level?: ThinkingLevel): string | undefined {
+  if (!level) return undefined;
+  if (level === "off" || level === "minimal" || level === "low") return "low";
+  if (level === "medium" || level === "high" || level === "xhigh") return level;
+  return undefined;
 }
 
 function renderSystemPrompt(system: string, agentic: boolean): string {

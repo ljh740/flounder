@@ -22,6 +22,7 @@ RUN apt-get update \
     python3 \
     python3-pip \
     python3-venv \
+    ripgrep \
     rustc \
     sed \
   && rm -rf /var/lib/apt/lists/*

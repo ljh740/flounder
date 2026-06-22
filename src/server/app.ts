@@ -13,16 +13,18 @@
 // unless a per-daemon bearer token is configured.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { defaultOutputDir } from "../config.js";
 import { MetadataStore, type RunKind, type Coverage, type ProviderInput, type ProviderProfile, type ProjectInput, type ProviderRoles, type RoleOverride } from "../db/store.js";
 import { getProviders, getModels, getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { type LaunchSpec, ActivityBus } from "./run-manager.js";
 import { THINKING_LEVELS } from "../config.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { loadScopeInventory, saveScopeInventory } from "../agent/scope-store.js";
+import { deriveScopeNote } from "../scope-note.js";
 
 const UI_HTML_PATH = fileURLToPath(new URL("./public/index.html", import.meta.url));
 const UI_PUBLIC_DIR = path.dirname(UI_HTML_PATH);
@@ -60,6 +62,9 @@ class ControlPlane {
     for (const id of this.daemons.values()) if (id === daemonId) count++;
     return count;
   }
+  hasDaemon(daemonId: number): boolean {
+    return this.daemonCount(daemonId) > 0;
+  }
 
   /** Nudge every connected daemon to (re)claim queued jobs. */
   nudge(): void {
@@ -68,6 +73,10 @@ class ControlPlane {
   /** Ask whichever daemon holds this job to abort it (others ignore an unknown jobId). */
   cancel(jobId: number): void {
     this.broadcast({ type: "cancel", jobId });
+  }
+  /** Adjust how many auto-selected scopes the running job should dig in this batch. */
+  setRunScopesTarget(jobId: number, target: number): void {
+    this.broadcast({ type: "set-run-scopes-target", jobId, target });
   }
   private broadcast(ev: unknown): void {
     const frame = `data: ${JSON.stringify(ev)}\n\n`;
@@ -132,7 +141,7 @@ function route(def: Omit<Route, "regex" | "paramNames">): Route {
 
 const ROUTES: Route[] = [
   route({ method: "GET", path: "/", summary: "The web dashboard (HTML).", hidden: true, handler: (c) => { c.res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); c.res.end(loadUiHtml()); } }),
-  route({ method: "GET", path: "/api", summary: "This catalog: every resource and operation, so an agent can self-learn and drive the workflow without the UI.", handler: (c) => sendJson(c.res, 200, catalog()) }),
+  route({ method: "GET", path: "/api", summary: "This catalog: every resource and operation, so an agent can self-learn and drive the workflow without the UI.", handler: (c) => sendJson(c.res, 200, apiCatalog()) }),
 
   route({
     method: "GET", path: "/api/projects",
@@ -141,21 +150,30 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "POST", path: "/api/projects",
-    summary: "Create a project (no run starts). Rejects a duplicate name.",
-    body: { name: "string (required, unique)", sourcePaths: "string[] — code to audit", buildRoot: "string? — buildable root", corpusPaths: "string[]? — specs/docs", config: "object? — { scopeCoverageMode, maxScopes, mapSteps, digSteps, digSamples, digConcurrency }" },
+    summary: "Create a project (no run starts). A project selects exactly one execution daemon and one default provider profile; optional phaseProviders in config can override prepare/map/dig/confirm. Rejects a duplicate name.",
+    body: {
+      name: "string (required, unique)",
+      daemonId: "number (required for normal use) — execution daemon that claims this project's jobs",
+      providerId: "number (required for normal use) — default provider profile; phase overrides live in config.phaseProviders",
+      dir: "string? — project directory under the selected daemon workspace; defaults to the display name",
+      sourcePaths: "string[] — code paths relative to dir",
+      buildRoot: "string? — buildable root relative to dir",
+      corpusPaths: "string[]? — specs/docs relative to dir",
+      config: "object? — { phaseProviders, scopeCoverageMode, maxScopes, mapSteps, digSteps, digSamples, digConcurrency, sandbox... }",
+    },
     handler: projectCreate,
   }),
   route({
     method: "GET", path: "/api/projects/:uuid",
-    summary: "Project detail: config, scope coverage, finding/run/confirmed counts, recent runs, confirm decisions.",
+    summary: "Project detail: config, prepare-material summary, scope coverage, finding/run/confirmed counts, recent runs, confirm decisions.",
     params: { uuid: "project UUID" },
     handler: projectGet,
   }),
   route({
     method: "PATCH", path: "/api/projects/:uuid",
-    summary: "Update a project's materials and/or config (no run starts). Used by Continue/Restart/Run afterwards.",
+    summary: "Update a project's daemon, provider, project-relative materials, and/or config (no run starts). Used by Continue/Restart/Run afterwards.",
     params: { uuid: "project UUID" },
-    body: { sourcePaths: "string[]?", buildRoot: "string?", corpusPaths: "string[]?", config: "object?" },
+    body: { daemonId: "number?", providerId: "number?", dir: "string?", sourcePaths: "string[]?", buildRoot: "string?", corpusPaths: "string[]?", config: "object?" },
     handler: projectUpdate,
   }),
   route({
@@ -180,6 +198,9 @@ const ROUTES: Route[] = [
       remap: "boolean? — re-enumerate scopes (restart)", fresh: "boolean? — confirm: ignore a prior interrupted confirm",
       quick: "boolean? — run: single breadth pass", mockLlm: "boolean? — offline mock model",
       region: "string? — audit: pinned region e.g. src/Foo.sol:120-180", scope: "string? — audit: scope id(s)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution",
+      scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run",
+      maxScopes: "number? — one-off scope cap for this dig batch", mapSteps: "number? — one-off map turn cap", digSteps: "number? — one-off per-scope dig turn cap",
+      maxSteps: "number? — one-off global turn cap", digSamples: "number? — one-off samples per scope", digConcurrency: "number? — one-off parallel scopes",
       inputRunDir: "string? — confirm: the finished run dir to reproduce",
       clue: "string? — prepare: the tx / address / project / link to acquire from",
       posture: "string? — prepare: 'blind' | 'informed'", matchDeployed: "boolean? — prepare: prove staged source matches the live deployment (default true)", endpoint: "string? — prepare: read-only access hint (e.g. RPC URL)",
@@ -191,13 +212,13 @@ const ROUTES: Route[] = [
     method: "GET", path: "/api/projects/:uuid/scopes",
     summary: "List the project's scope inventory (audited / pending / deferred) — the map output.",
     params: { uuid: "project UUID" },
-    handler: (c) => withProject(c, (id) => sendJson(c.res, 200, { scopes: c.store.listScopes(id), progress: c.store.scopeProgress(id) })),
+    handler: projectScopesGet,
   }),
   route({
     method: "PATCH", path: "/api/projects/:uuid/scopes/:scopeId",
-    summary: "Set a scope's status — mark it `deferred` to skip it in auto-dig (or `pending` to resume). Updates the persisted inventory the audit reads, so the next run honors it.",
+    summary: "Edit a mapped scope queue item. Use {prioritize:true} to move it to the top of the next auto-dig batch, or set status=`deferred` to skip it / `pending` to resume it. Updates the persisted inventory the audit reads, so the next run honors it.",
     params: { uuid: "project UUID", scopeId: "scope id from the inventory" },
-    body: { status: "'deferred' (skip) | 'pending' (resume) | 'audited'" },
+    body: { prioritize: "boolean? — move this pending scope to the top of the dig queue", status: "'deferred' (skip) | 'pending' (resume) | 'audited'" },
     handler: scopeSetStatus,
   }),
   route({
@@ -258,12 +279,13 @@ const ROUTES: Route[] = [
 
   route({
     method: "GET", path: "/api/daemons",
-    summary: "Registered execution-plane daemons (id, name, workspace, last_seen_at) — no tokens.",
-    handler: (c) => sendJson(c.res, 200, { daemons: c.store.listDaemons() }),
+    summary: "Registered execution-plane daemons with provider-auth summaries — no tokens. Pass ?include=capabilities for the raw daemon capability report.",
+    query: { include: "'capabilities'? — include raw capability details such as expected auth env vars" },
+    handler: (c) => sendJson(c.res, 200, { daemons: daemonRows(c) }),
   }),
   route({
     method: "POST", path: "/api/daemons",
-    summary: "Register a daemon and mint its bearer token (shown ONCE). Configure it on the daemon: flounder daemon --server <url> --token <token>.",
+    summary: "Register a daemon and mint its bearer token (shown ONCE). Configure it on the daemon: flounder daemon start --server <url> --token <token>.",
     body: { name: "string (required) — a label for this executor" },
     handler: daemonCreate,
   }),
@@ -289,7 +311,10 @@ const ROUTES: Route[] = [
       const tracking = c.url.searchParams.get("tracking") || undefined;
       const limit = Number(c.url.searchParams.get("limit")) || undefined;
       const offset = Number(c.url.searchParams.get("offset")) || undefined;
-      sendJson(c.res, 200, { findings: c.store.listGlobalFindings({ status, tracking, limit, offset }), stats: c.store.globalFindingStats() });
+      const all = reportableFindings(c.store.listGlobalFindings({ status, tracking, limit: 10_000, offset: 0 }));
+      const start = Math.max(0, Math.floor(offset ?? 0));
+      const end = start + Math.max(1, Math.floor(limit ?? 200));
+      sendJson(c.res, 200, { findings: all.slice(start, end).map(findingSummaryRow), stats: globalFindingStats(all) });
     },
   }),
   route({
@@ -322,6 +347,19 @@ const ROUTES: Route[] = [
     handler: (c) => { const job = c.store.getJob(Number(c.params.id)); job ? sendJson(c.res, 200, { job }) : sendJson(c.res, 404, { error: "no such job" }); },
   }),
   route({
+    method: "POST", path: "/api/jobs/:id/cancel",
+    summary: "Cancel a queued/dispatched/running job before or after a daemon starts it. Use this for queued jobs that do not yet have a run id.",
+    params: { id: "job id" },
+    handler: (c) => {
+      const id = Number(c.params.id);
+      const job = c.store.getJob(id);
+      if (!job) return sendJson(c.res, 404, { error: "no such job" });
+      const ok = c.store.cancelJob(id);
+      c.plane.cancel(id);
+      sendJson(c.res, 200, { ok, canceled: id });
+    },
+  }),
+  route({
     method: "GET", path: "/api/runs/:id",
     summary: "A single run (status, kind, coverage, finding count, run dir, timestamps).",
     params: { id: "run id" },
@@ -329,6 +367,13 @@ const ROUTES: Route[] = [
       const run = c.store.getRun(Number(c.params.id));
       run ? sendJson(c.res, 200, { run }) : sendJson(c.res, 404, { error: "no such run" });
     },
+  }),
+  route({
+    method: "PATCH", path: "/api/runs/:id",
+    summary: "Adjust a running run. `runScopesTarget` changes only this run's auto-selected dig batch target; the daemon applies it at the next scope boundary.",
+    params: { id: "run id" },
+    body: { runScopesTarget: "number? — new current-run scope target, minimum 1" },
+    handler: runUpdate,
   }),
   route({
     method: "POST", path: "/api/runs/:id/stop",
@@ -350,13 +395,14 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "GET", path: "/api/runs/:id/log",
-    summary: "SSE stream of a run's live activity: the model's token-level thinking + output (audit_thinking / audit_text), tool calls (audit_step), and milestones, as reported by the executing daemon. Replays recent backlog then streams new events.",
+    summary: "Run live activity. Default is an SSE stream for the dashboard; pass ?tail=N or ?format=json for a bounded JSON snapshot of recent events.",
     params: { id: "run id" },
-    handler: (c) => streamFromBus(c.res, c.plane.bus(Number(c.params.id))),
+    query: { tail: "number? — return JSON with the latest N events instead of opening SSE", format: "'json'? — return a bounded JSON snapshot; defaults to tail=200 when tail is omitted" },
+    handler: runLog,
   }),
 
-  route({ method: "GET", path: "/api/active", summary: "In-flight jobs (queued/dispatched/running) across all daemons.", handler: (c) => sendJson(c.res, 200, { active: activeRuns(c.store), daemons: c.store.listDaemons() }) }),
-  route({ method: "GET", path: "/api/stream", summary: "Server-sent events: the project snapshot + active list, pushed ~1/s for live updates.", handler: (c) => streamSnapshots(c.res, c.store) }),
+  route({ method: "GET", path: "/api/active", summary: "In-flight jobs (queued/dispatched/running) across all daemons.", handler: (c) => sendJson(c.res, 200, { active: activeRuns(c.store, c.plane), daemons: daemonRows(c) }) }),
+  route({ method: "GET", path: "/api/stream", summary: "Server-sent events: the project snapshot + active list, pushed ~1/s for live updates.", handler: (c) => streamSnapshots(c.res, c.store, c.plane) }),
 
   // ---- execution plane: daemon ↔ server (hidden from the agent catalog) ----------------
   route({ method: "POST", path: "/api/daemon/register", summary: "(daemon) Register/heartbeat. Bearer token required.", hidden: true, handler: daemonRegister }),
@@ -368,11 +414,16 @@ const ROUTES: Route[] = [
   route({ method: "POST", path: "/api/daemon/jobs/:id/status", summary: "(daemon) Report a job's terminal status (done/error/canceled).", hidden: true, handler: daemonJobStatus }),
 ];
 
-function catalog(): unknown {
+export function apiCatalog(): {
+  name: string;
+  description: string;
+  resources: string[];
+  endpoints: Array<Record<string, unknown>>;
+} {
   return {
     name: "flounder",
     description: "REST API for tracking and driving white-hat audits. Resources: project (CRUD), run (launch/stop/read), scope, finding, confirm-decision. Runs execute on connected daemons; every UI operation is one of these calls.",
-    resources: ["project", "provider", "run", "scope", "finding", "confirm-decision"],
+    resources: ["project", "provider", "daemon", "run", "scope", "finding", "confirm-decision"],
     endpoints: ROUTES.filter((r) => !r.hidden).map((r) => ({
       method: r.method,
       path: r.path,
@@ -385,7 +436,7 @@ function catalog(): unknown {
 }
 
 export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof createServer> {
-  const out = options.out ?? "runs";
+  const out = options.out ?? defaultOutputDir();
   const port = options.port ?? 4500;
   const host = options.host ?? "127.0.0.1"; // localhost by default; exposing the control plane requires operator auth
   const loopback = isLoopbackHost(host);
@@ -397,8 +448,10 @@ export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof 
   // Seed a couple of starter profiles so a fresh install has something to select (no-op if any exist).
   store.seedProviders([
     { name: "openai-codex · gpt-5.5 · xhigh", provider: "openai-codex", model: "gpt-5.5", thinking: "xhigh" },
-    { name: "claude-code · opus · high", provider: "claude-code", model: "claude-opus-4-8", thinking: "high" },
+    { name: "claude-code · opus · high", provider: "claude-code", model: "opus", thinking: "high" },
   ]);
+  const artifactReconciled = reconcileSuccessfulArtifactRuns(store);
+  if (artifactReconciled > 0) console.log(`[flounder ui] reconciled ${artifactReconciled} completed run artifact${artifactReconciled === 1 ? "" : "s"}`);
   const plane = new ControlPlane();
   // NOTE: we do NOT reconcile `running` rows on startup — runs execute on daemons, which
   // survive a server restart. Blind-killing them here would be wrong. (A future daemon
@@ -447,6 +500,46 @@ export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof 
     console.log(`[flounder ui] http://${host}:${port}  (API catalog: http://${host}:${port}/api · store: ${out}/flounder.db)`);
   });
   return server;
+}
+
+function reconcileSuccessfulArtifactRuns(store: MetadataStore): number {
+  let changed = 0;
+  for (const run of store.listRuns()) {
+    if (String(run.status) !== "error") continue;
+    const runId = Number(run.id);
+    if (!Number.isFinite(runId) || !hasSuccessfulTerminalEvent(run)) continue;
+    changed += store.reconcileTerminalRun(runId, "done");
+  }
+  return changed;
+}
+
+function hasSuccessfulTerminalEvent(run: Record<string, unknown>): boolean {
+  const runDir = stringValue(run.run_dir);
+  if (!runDir) return false;
+  const eventsPath = path.join(path.resolve(runDir), "events.jsonl");
+  if (!existsSync(eventsPath)) return false;
+  try {
+    const lines = readFileSync(eventsPath, "utf8").trim().split("\n").filter(Boolean).slice(-500);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (!line) continue;
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const kind = stringValue(event.kind);
+      if (kind === "audit_done" || kind === "audit_confirm_done") {
+        const stoppedReason = stringValue(event.stoppedReason);
+        return !stoppedReason || stoppedReason === "finished";
+      }
+      if (kind === "audit_prepare_done") return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -563,19 +656,329 @@ async function projectCreate(c: Ctx): Promise<void> {
 
 function projectGet(c: Ctx): void {
   withProject(c, (id, project) => {
+    const runs = c.store.listRuns(id, 50);
+    const storedProgress = c.store.scopeProgress(id);
+    const storedScopes = c.store.listScopes(id);
+    const scopeCheckpoint = latestScopeCheckpoint(runs);
+    const scopes = scopeApiRows(storedScopes.length > 0 ? storedScopes : scopeCheckpoint?.scopes ?? storedScopes);
+    const progress = storedProgress.total > 0 ? storedProgress : scopeCheckpoint?.progress ?? storedProgress;
+    const allFindings = reportableFindings(c.store.listFindings(id));
+    const findingSummaries = allFindings.map(findingSummaryRow);
     sendJson(c.res, 200, {
       project,
-      progress: c.store.scopeProgress(id),
-      statusCounts: c.store.findingStatusCounts(id),
-      findingsTotal: c.store.countFindings(id),
+      progress,
+      statusCounts: findingCounts(allFindings),
+      findingsTotal: allFindings.length,
       confirmedBugs: c.store.countConfirmedBugs(id),
-      runs: c.store.listRuns(id, 50),
+      runs,
       runsTotal: c.store.countRuns(id),
       confirmDecisions: c.store.listConfirmDecisions(id),
-      scopes: c.store.listScopes(id),
-      allFindings: c.store.listFindings(id),
+      scopes,
+      allFindings: findingSummaries,
+      prepareSummary: latestPrepareSummary(runs),
     });
   });
+}
+
+function projectScopesGet(c: Ctx): void {
+  withProject(c, (id) => {
+    const scopes = scopeApiRows(c.store.listScopes(id));
+    const progress = c.store.scopeProgress(id);
+    if (scopes.length > 0 || progress.total > 0) return sendJson(c.res, 200, { scopes, progress });
+    const checkpoint = latestScopeCheckpoint(c.store.listRuns(id, 50));
+    sendJson(c.res, 200, { scopes: scopeApiRows(checkpoint?.scopes ?? scopes), progress: checkpoint?.progress ?? progress });
+  });
+}
+
+function scopeApiRows(scopes: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return scopes.map((scope) => {
+    const title = stringValue(scope.title) || stringValue(scope.scope_id);
+    const location = stringValue(scope.location);
+    return {
+      ...scope,
+      obligation: stringValue(scope.obligation) || title,
+      region: stringValue(scope.region) || location,
+    };
+  });
+}
+
+function latestPrepareSummary(runs: Array<Record<string, unknown>>): Record<string, unknown> | null {
+  const run = runs.find((entry) => entry.kind === "prepare" && typeof entry.run_dir === "string");
+  if (!run) return null;
+  return readPrepareSummary(run);
+}
+
+function latestScopeCheckpoint(runs: Array<Record<string, unknown>>): { scopes: Array<Record<string, unknown>>; progress: Coverage } | null {
+  const run = runs.find((entry) => ["run", "map", "audit"].includes(String(entry.kind)) && typeof entry.run_dir === "string");
+  if (!run) return null;
+  const runDir = path.resolve(String(run.run_dir));
+  const candidates = [
+    path.join(runDir, "audit", "workspace", "scopes.json"),
+    path.join(runDir, "scopes.json"),
+    path.join(runDir, "inventory", "scopes.json"),
+  ];
+  const file = candidates.find((candidate) => existsSync(candidate));
+  if (!file) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
+    const rawScopes = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).scopes)
+        ? ((parsed as Record<string, unknown>).scopes as unknown[])
+        : [];
+    const scopes = rawScopes
+      .map((entry, index) => scopeCheckpointRow(entry, index))
+      .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+    if (scopes.length === 0) return null;
+    const audited = scopes.filter((scope) => ["audited", "done", "complete", "completed"].includes(String(scope.status))).length;
+    const deferred = scopes.filter((scope) => scope.status === "deferred").length;
+    return { scopes, progress: { total: scopes.length, audited, deferred, pending: Math.max(0, scopes.length - audited - deferred) } };
+  } catch {
+    return null;
+  }
+}
+
+function scopeCheckpointRow(entry: unknown, index: number): Record<string, unknown> | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const scope = entry as Record<string, unknown>;
+  const scopeId = stringValue(scope.scope_id ?? scope.id) || `checkpoint-${index + 1}`;
+  const status = stringValue(scope.status) || "pending";
+  return {
+    scope_id: scopeId,
+    title: stringValue(scope.title ?? scope.obligation) || scopeId,
+    location: stringValue(scope.location ?? scope.region),
+    obligation: stringValue(scope.obligation ?? scope.title) || scopeId,
+    region: stringValue(scope.region ?? scope.location),
+    score: numericValue(scope.score),
+    priority: numericValue(scope.priority),
+    status,
+  };
+}
+
+function readPrepareSummary(run: Record<string, unknown>): Record<string, unknown> {
+  const runDir = path.resolve(String(run.run_dir));
+  const workspaceDir = path.join(runDir, "prepare", "workspace");
+  const rootManifest = path.join(runDir, "prepare_manifest.json");
+  const workspaceManifest = path.join(workspaceDir, "prepare_manifest.json");
+  const manifestPath = existsSync(rootManifest) ? rootManifest : existsSync(workspaceManifest) ? workspaceManifest : undefined;
+  const workspace = summarizePreparedWorkspace(workspaceDir);
+  const issues: string[] = [];
+  let manifest: Record<string, unknown> | undefined;
+  let manifestStatus: "present" | "missing" | "invalid" = "missing";
+  if (manifestPath) {
+    try {
+      const parsed = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        manifest = parsed as Record<string, unknown>;
+        manifestStatus = "present";
+      } else {
+        manifestStatus = "invalid";
+        issues.push("prepare_manifest.json is not a JSON object");
+      }
+    } catch (error) {
+      manifestStatus = "invalid";
+      issues.push(`prepare_manifest.json could not be parsed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    issues.push("prepare_manifest.json has not been written yet");
+  }
+
+  const components = Array.isArray(manifest?.components) ? (manifest.components as Array<Record<string, unknown>>) : [];
+  if (manifestStatus === "present" && components.length === 0) issues.push("manifest lists no components");
+  let matched = 0;
+  let unverified = 0;
+  let sourcePinned = 0;
+  let inScope = 0;
+  const componentRows = components.slice(0, 8).map((component) => summarizePrepareComponent(component));
+  for (const component of components) {
+    const summary = summarizePrepareComponent(component);
+    if (summary.inScope) inScope += 1;
+    if (summary.match === "matched") matched += 1;
+    else if (summary.match === "unverified") unverified += 1;
+    if (summary.revision) sourcePinned += 1;
+    if (summary.deployed && summary.match !== "matched" && summary.match !== "unverified") {
+      issues.push(`${summary.identity}: deployed on ${summary.platform || "unknown platform"} but match is ${summary.match || "missing"}`);
+    }
+    if (!summary.deployed && !summary.revision) {
+      issues.push(`${summary.identity}: source origin is not pinned`);
+    }
+  }
+  if (unverified > 0) issues.push(`${unverified} deployed component(s) are unverified and should be treated as trust boundaries`);
+
+  const rawManifestState = stringValue(manifest?.status);
+  const runStatus = stringValue(run.status);
+  const terminalPrepareRun = runStatus !== "running";
+  const manifestState = manifestStatus === "present" && terminalPrepareRun && rawManifestState.toLowerCase() === "in_progress"
+    ? "partial"
+    : rawManifestState;
+  if (manifestStatus === "present" && manifestState && !["ready", "done", "complete", "completed", "verified", "partial"].includes(manifestState.toLowerCase())) {
+    issues.push(`prepare manifest status is ${manifestState}; treat staged materials as not fully resolved`);
+  }
+  if (manifestStatus === "present" && manifestState === "partial" && rawManifestState.toLowerCase() === "in_progress") {
+    issues.push("prepare run ended before all material gaps were closed; staged materials are usable but partial");
+  }
+
+  const answerFirewall = describeAnswerFirewall(manifest?.answer_firewall);
+  if (answerFirewall !== "clean" && answerFirewall !== "not reported" && !answerFirewall.startsWith("clean ")) {
+    issues.push(`answer firewall is ${answerFirewall}`);
+  }
+
+  return {
+    runId: run.id,
+    status: run.status,
+    manifestStatus,
+    manifestState: manifestState || undefined,
+    manifestArtifact: manifestPath ? "prepare_manifest.json" : undefined,
+    clue: stringValue(manifest?.clue),
+    posture: stringValue(manifest?.posture),
+    scopeDeclaration: stringValue(manifest?.scope_declaration),
+    answerFirewall,
+    componentsTotal: components.length,
+    components: componentRows,
+    inScope,
+    matched,
+    unverified,
+    sourcePinned,
+    gaps: summarizePrepareGaps(manifest?.gaps),
+    offscope: summarizePrepareGaps(manifest?.offscope),
+    issues: uniqueStrings(issues).slice(0, 12),
+    workspace,
+  };
+}
+
+function summarizePrepareComponent(component: Record<string, unknown>): Record<string, unknown> {
+  const origin = objectValue(component.origin) ?? objectValue(component.provenance);
+  const deploymentMatch = objectValue(component.deployment_match);
+  const platform = stringValue(component.platform);
+  const normalizedPlatform = platform.trim().toLowerCase();
+  const deployed = normalizedPlatform.length > 0 && normalizedPlatform !== "none" && normalizedPlatform !== "n/a";
+  const originSource = stringValue(component.source) || stringValue(origin?.url) || stringValue(origin?.repo_url);
+  const originRevision = stringValue(component.revision) || stringValue(origin?.commit) || stringValue(origin?.tag) || stringValue(origin?.ref) || stringValue(origin?.branch);
+  const stagedPath = stringValue(component.staged_path) || stringValue(component.path);
+  const identity = stringValue(component.identity) || stagedPath || stringValue(component.id) || stringValue(component.name) || "unknown component";
+  const match = stringValue(component.match) || stringValue(deploymentMatch?.status);
+  return {
+    role: stringValue(component.role) || stringValue(component.security_role) || stringValue(component.component_type) || stringValue(component.type) || "component",
+    identity,
+    platform,
+    revision: originRevision,
+    source: originSource,
+    stagedPath,
+    inScope: component.in_scope === true,
+    match: match.toLowerCase(),
+    matchEvidence: stringValue(component.match_evidence) || stringValue(deploymentMatch?.evidence) || stringValue(deploymentMatch?.reason) || stringValue(deploymentMatch?.note),
+    deployed,
+  };
+}
+
+function summarizePreparedWorkspace(workspaceDir: string): Record<string, unknown> {
+  if (!existsSync(workspaceDir)) return { exists: false, files: 0, gitDirs: 0, sampleFiles: [] };
+  const stack = [""];
+  const sampleFiles: string[] = [];
+  const fileLimit = 5000;
+  let files = 0;
+  let gitDirs = 0;
+  while (stack.length && files < fileLimit) {
+    const rel = stack.pop() ?? "";
+    const abs = path.join(workspaceDir, rel);
+    let stat;
+    try {
+      stat = statSync(abs);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      if (path.basename(abs) === ".git") {
+        gitDirs += 1;
+        continue;
+      }
+      let children: string[] = [];
+      try {
+        children = readdirSync(abs);
+      } catch {
+        children = [];
+      }
+      for (const child of children) stack.push(path.join(rel, child));
+      continue;
+    }
+    files += 1;
+    if (path.basename(rel) === "prepare_manifest.json") continue;
+    if (sampleFiles.length < 12) sampleFiles.push(rel);
+  }
+  return { exists: true, files, fileLimit, filesTruncated: stack.length > 0, gitDirs, sampleFiles };
+}
+
+function describeAnswerFirewall(value: unknown): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "clean (empty list)";
+    const notes = value.map((entry) => stringValue(entry)).filter(Boolean);
+    if (notes.every(isCleanFirewallNote)) return `clean · ${value.length} guardrail note${value.length === 1 ? "" : "s"}`;
+    return notes.join("; ");
+  }
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const posture = stringValue(obj.posture) || stringValue(obj.policy);
+    const notes = stringValue(obj.notes);
+    const excluded = Array.isArray(obj.excluded_material) ? obj.excluded_material.length : undefined;
+    const parts = [posture, excluded !== undefined ? `${excluded} excluded material${excluded === 1 ? "" : "s"}` : "", notes].filter(Boolean);
+    const text = parts.length ? parts.join(" · ") : "reported";
+    return isCleanFirewallNote(text) ? `clean · ${text}` : text;
+  }
+  return "not reported";
+}
+
+function isCleanFirewallNote(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (lower.includes("blind")) return true;
+  if ((lower.includes("not fetched") || lower.includes("not staged") || lower.includes("skipped") || lower.includes("excluded")) && !lower.includes("included")) return true;
+  return lower === "clean" || lower.startsWith("clean ");
+}
+
+function summarizePrepareGaps(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 8)
+    .map((entry) => {
+      if (typeof entry === "string") return entry;
+      if (entry && typeof entry === "object") {
+        const obj = entry as Record<string, unknown>;
+        const id = stringValue(obj.id ?? obj.kind);
+        const desc = stringValue(obj.description ?? obj.note ?? obj.where);
+        return [id, desc].filter(Boolean).join(": ");
+      }
+      return stringValue(entry);
+    })
+    .filter(Boolean);
+}
+
+function stringValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function numericValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
 }
 
 async function projectUpdate(c: Ctx): Promise<void> {
@@ -647,7 +1050,11 @@ async function runLaunch(c: Ctx): Promise<void> {
   const body = (await readBody(c.req)) as Record<string, unknown>;
   const profile = project.provider_id != null ? c.store.getProvider(Number(project.provider_id)) : undefined;
   const phaseProfiles = phaseProviderProfiles(project, c.store);
-  const spec = launchSpec(project, body, c.out, profile, c.store.scopeProgress(Number(project.id)), phaseProfiles);
+  const projectId = Number(project.id);
+  const runs = c.store.listRuns(projectId, 50);
+  const spec = launchSpec(project, body, c.out, profile, c.store.scopeProgress(projectId), phaseProfiles);
+  const prepared = applyPreparedWorkspaceIfNeeded(spec, runs);
+  if (!prepared.ok) return sendJson(c.res, 400, { error: prepared.error });
   // Confirm is FINDING-grained + resumable: when no explicit run dir is given, resolve the work set
   // from finding STATUS — a specific finding (body.findingId) or all pending-confirmable findings
   // (confirmed by the audit, not yet decided on the real target). The confirm then updates each
@@ -667,9 +1074,51 @@ async function runLaunch(c: Ctx): Promise<void> {
     }
   }
   const daemonId = project.daemon_id != null ? Number(project.daemon_id) : undefined;
+  const allowOfflineQueue = body.allowOfflineQueue === true;
+  if (daemonId !== undefined && !allowOfflineQueue && !c.plane.hasDaemon(daemonId)) {
+    const daemon = c.store.getDaemon(daemonId);
+    const label = daemon?.name ? String(daemon.name) : `daemon-${daemonId}`;
+    return sendJson(c.res, 409, {
+      error: `${label} is not connected. Start that daemon, select an online daemon for this project, or pass allowOfflineQueue:true to queue for an offline remote executor.`,
+      daemonId,
+      daemonOnline: false,
+    });
+  }
   const jobId = c.store.enqueueJob(spec.target, spec, daemonId);
   c.plane.nudge();
   sendJson(c.res, 200, { jobId, verb: spec.verb, queued: true, daemons: c.plane.daemonCount(daemonId), daemonId });
+}
+
+function applyPreparedWorkspaceIfNeeded(spec: LaunchSpec, runs: Array<Record<string, unknown>>): { ok: true } | { ok: false; error: string } {
+  if (spec.verb === "prepare" || spec.verb === "confirm") return { ok: true };
+  if (spec.sourcePaths.length > 0) return { ok: true };
+  const prepared = latestPreparedWorkspace(runs);
+  if (!prepared) {
+    return { ok: false, error: "this project has no source paths and no prepared workspace yet. Run Prepare first, or configure source paths." };
+  }
+  spec.dir = undefined;
+  spec.sourcePaths = [prepared.workspaceDir];
+  spec.buildRoot = prepared.workspaceDir;
+  if (!spec.scopeNote && prepared.scopeNote) spec.scopeNote = prepared.scopeNote;
+  return { ok: true };
+}
+
+function latestPreparedWorkspace(runs: Array<Record<string, unknown>>): { workspaceDir: string; manifestPath: string; scopeNote?: string } | undefined {
+  const run = runs.find((entry) => entry.kind === "prepare" && typeof entry.run_dir === "string");
+  if (!run) return undefined;
+  const runDir = path.resolve(String(run.run_dir));
+  const workspaceDir = path.join(runDir, "prepare", "workspace");
+  const rootManifest = path.join(runDir, "prepare_manifest.json");
+  const workspaceManifest = path.join(workspaceDir, "prepare_manifest.json");
+  const manifestPath = existsSync(rootManifest) ? rootManifest : existsSync(workspaceManifest) ? workspaceManifest : undefined;
+  if (!manifestPath || !existsSync(workspaceDir)) return undefined;
+  let scopeNote: string | undefined;
+  try {
+    scopeNote = deriveScopeNote(JSON.parse(readFileSync(manifestPath, "utf8")));
+  } catch {
+    scopeNote = undefined;
+  }
+  return { workspaceDir, manifestPath, ...(scopeNote ? { scopeNote } : {}) };
 }
 
 // Queue an ad-hoc run from a full launch spec — the CLI's enqueue entry point. Unlike
@@ -756,9 +1205,153 @@ function findingsList(c: Ctx): void {
     const search = c.url.searchParams.get("q") ?? undefined;
     const limit = clampInt(c.url.searchParams.get("limit"), 50, 1, 500);
     const offset = clampInt(c.url.searchParams.get("offset"), 0, 0, 1_000_000);
-    const findings = c.store.queryFindings(id, { status, search, limit, offset }).map((finding) => ({ ...finding, timeline: c.store.findingTimeline(Number(finding.id)) }));
-    sendJson(c.res, 200, { findings, total: c.store.countFindings(id, { status, search }), limit, offset });
+    const rows = reportableFindings(c.store.listFindings(id))
+      .filter((finding) => !status || finding.status === status)
+      .filter((finding) => !search || `${finding.title ?? ""} ${finding.location ?? ""}`.toLowerCase().includes(search.toLowerCase()));
+    const findings = rows.slice(offset, offset + limit).map((finding) => findingDisplayRow({ ...finding, timeline: c.store.findingTimeline(Number(finding.id)) }));
+    sendJson(c.res, 200, { findings, total: rows.length, limit, offset });
   });
+}
+
+function reportableFindings(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return dedupeFindingRows(rows.filter(isReportableFinding));
+}
+
+function findingSummaryRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of [
+    "id",
+    "project_id",
+    "project_name",
+    "project_uuid",
+    "run_id",
+    "finding_key",
+    "title",
+    "location",
+    "severity",
+    "status",
+    "confirm_status",
+    "report_path",
+    "scope_id",
+    "confidence",
+    "tracking_status",
+    "created_at",
+    "updated_at",
+  ]) {
+    if (key in row) out[key] = row[key];
+  }
+  return findingDisplayRow(out);
+}
+
+function findingDisplayRow(row: Record<string, unknown>): Record<string, unknown> {
+  if (!("title" in row)) return row;
+  return { ...row, title: cleanFindingTitle(row.title) };
+}
+
+function cleanFindingTitle(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  return value.replace(/^\s*(?:UNMET|SUSPECTED|CONFIRMED|REFUTED|DISPUTED|FINDING|BUG)\s*:\s*/i, "").trim();
+}
+
+function isReportableFinding(row: Record<string, unknown>): boolean {
+  const status = String(row.status ?? "").toLowerCase();
+  if (status === "discharged") return false;
+  const severity = String(row.severity ?? "").toLowerCase();
+  if (severity === "info" && !isConfirmedFindingStatus(status)) return false;
+  return true;
+}
+
+function isConfirmedFindingStatus(status: string): boolean {
+  return status === "confirmed-source" || status === "confirmed-executable" || status === "confirmed-differential";
+}
+
+const FINDING_STATUS_RANK: Record<string, number> = {
+  discharged: 0,
+  refuted: 1,
+  suspected: 2,
+  "confirmed-source": 3,
+  "confirmed-executable": 4,
+  "confirmed-differential": 5,
+};
+
+const FINDING_SEVERITY_RANK: Record<string, number> = {
+  info: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+function dedupeFindingRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const best = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const key = findingDisplayDedupeKey(row);
+    const current = best.get(key);
+    if (!current || compareFindingRows(row, current) > 0) best.set(key, row);
+  }
+  return rows.filter((row) => best.get(findingDisplayDedupeKey(row)) === row);
+}
+
+function findingDisplayDedupeKey(row: Record<string, unknown>): string {
+  const project = normalizeDedupePart(row.project_id ?? row.project_uuid ?? "");
+  const title = normalizeDedupePart(cleanFindingTitle(row.title));
+  const location = normalizeDedupePart(row.location);
+  if (title || location) return `${project}|${location}|${title}`;
+  return `${project}|${normalizeDedupePart(row.finding_key ?? row.id ?? "")}`;
+}
+
+function normalizeDedupePart(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function compareFindingRows(a: Record<string, unknown>, b: Record<string, unknown>): number {
+  for (const delta of [
+    rank(FINDING_STATUS_RANK, a.status) - rank(FINDING_STATUS_RANK, b.status),
+    rank(FINDING_SEVERITY_RANK, a.severity) - rank(FINDING_SEVERITY_RANK, b.severity),
+    numberish(a.confidence) - numberish(b.confidence),
+    findingRichness(a) - findingRichness(b),
+    timestampMs(a.updated_at) - timestampMs(b.updated_at),
+  ]) {
+    if (delta !== 0) return delta;
+  }
+  return numberish(a.id) - numberish(b.id);
+}
+
+function rank(table: Record<string, number>, value: unknown): number {
+  return table[String(value ?? "").toLowerCase()] ?? -1;
+}
+
+function numberish(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : Number(value) || 0;
+}
+
+function timestampMs(value: unknown): number {
+  const n = Date.parse(String(value ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function findingRichness(row: Record<string, unknown>): number {
+  return ["description", "evidence", "exploit_sketch", "fix"].reduce((sum, key) => sum + String(row[key] ?? "").trim().length, 0);
+}
+
+function findingCounts(rows: Array<Record<string, unknown>>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const status = String(row.status ?? "");
+    if (!status) continue;
+    counts[status] = (counts[status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function globalFindingStats(rows: Array<Record<string, unknown>>): { total: number; byStatus: Record<string, number>; byTracking: Record<string, number> } {
+  const byStatus = findingCounts(rows);
+  const byTracking: Record<string, number> = {};
+  for (const row of rows) {
+    const tracking = String(row.tracking_status ?? "open") || "open";
+    byTracking[tracking] = (byTracking[tracking] ?? 0) + 1;
+  }
+  return { total: rows.length, byStatus, byTracking };
 }
 
 function confirmDecisionsList(c: Ctx): void {
@@ -787,6 +1380,13 @@ function availableProviders(): string[] {
 }
 
 function availableModels(provider: string): Array<{ id: string; name: string; reasoning: boolean; thinkingLevels: ModelThinkingLevel[] }> {
+  if (provider === "claude-code") {
+    return [
+      { id: "opus", name: "Opus (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh"] as ModelThinkingLevel[] },
+      { id: "sonnet", name: "Sonnet (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh"] as ModelThinkingLevel[] },
+      { id: "fable", name: "Fable (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh"] as ModelThinkingLevel[] },
+    ];
+  }
   try {
     const models = getModels(provider as never);
     return (models ?? []).map((m) => ({
@@ -866,13 +1466,19 @@ function runArtifact(c: Ctx): void {
   const name = c.url.searchParams.get("name") || "audit_report.md";
   if (!ALLOWED_ARTIFACT.test(name)) return sendJson(c.res, 400, { error: "artifact not allowed", name });
   const runDir = path.resolve(String(run.run_dir));
-  const file = path.join(runDir, name);
+  let file = path.join(runDir, name);
   if (path.dirname(file) !== runDir) return sendJson(c.res, 400, { error: "bad path" });
   let text: string;
   try {
     text = readFileSync(file, "utf8"); // read BEFORE committing a status, so a missing file is a clean 404
   } catch {
-    return sendJson(c.res, 404, { error: "artifact not found", name });
+    if (name !== "prepare_manifest.json") return sendJson(c.res, 404, { error: "artifact not found", name });
+    file = path.join(runDir, "prepare", "workspace", "prepare_manifest.json");
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      return sendJson(c.res, 404, { error: "artifact not found", name });
+    }
   }
   c.res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
   c.res.end(text);
@@ -880,18 +1486,51 @@ function runArtifact(c: Ctx): void {
 
 function runStop(c: Ctx): void {
   const id = Number(c.params.id);
-  if (!c.store.getRun(id)) return sendJson(c.res, 404, { error: "no such run" });
+  const run = c.store.getRun(id);
+  if (!run) return sendJson(c.res, 404, { error: "no such run" });
   const job = c.store.getJobByRun(id);
   if (job) {
-    c.store.requestJobCancel(Number(job.id));
+    c.store.cancelRunJob(Number(job.id));
     c.plane.cancel(Number(job.id)); // nudge the executing daemon to abort
   }
-  sendJson(c.res, 200, { stopped: Boolean(job) });
+  if (run.status === "running") c.store.finishRun(id, "killed");
+  sendJson(c.res, 200, { stopped: Boolean(job) || run.status === "running" });
 }
 
-function streamFromBus(res: ServerResponse, bus: ActivityBus): void {
+async function runUpdate(c: Ctx): Promise<void> {
+  const id = Number(c.params.id);
+  const run = c.store.getRun(id);
+  if (!run) return sendJson(c.res, 404, { error: "no such run" });
+  if (run.status !== "running") return sendJson(c.res, 409, { error: "only running runs can be adjusted" });
+  const body = (await readBody(c.req)) as Record<string, unknown>;
+  const raw = body.runScopesTarget ?? body.maxScopes;
+  if (raw === undefined) return sendJson(c.res, 400, { error: "runScopesTarget is required" });
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return sendJson(c.res, 400, { error: "runScopesTarget must be a number" });
+  if (run.run_scopes_target == null) return sendJson(c.res, 409, { error: "run has not entered a scope batch yet" });
+  const target = Math.max(1, Math.floor(raw));
+  c.store.updateRunScopesTarget(id, target);
+  const job = c.store.getJobByRun(id);
+  if (job) c.plane.setRunScopesTarget(Number(job.id), target);
+  sendJson(c.res, 200, { ok: true, runScopesTarget: target, applied: Boolean(job) });
+}
+
+function runLog(c: Ctx): void {
+  const id = Number(c.params.id);
+  const run = c.store.getRun(id);
+  if (!run) return sendJson(c.res, 404, { error: "no such run" });
+  const bus = c.plane.bus(id);
+  const wantsJson = c.url.searchParams.has("tail") || c.url.searchParams.get("format") === "json";
+  if (wantsJson) {
+    const limit = clampInt(c.url.searchParams.get("tail"), 200, 1, 2000);
+    return sendJson(c.res, 200, { runId: id, events: combinedRunActivity(run, bus, limit), limit });
+  }
+  streamFromBus(c.res, bus, persistedRunActivity(run, 200));
+}
+
+function streamFromBus(res: ServerResponse, bus: ActivityBus, replay: Array<Record<string, unknown>> = []): void {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   res.write(": open\n\n"); // flush headers immediately so the client's EventSource opens even before the first event
+  for (const ev of replay) res.write(`data: ${JSON.stringify(ev)}\n\n`);
   // `let` + no-op default: subscribe() replays backlog synchronously, so the callback can fire
   // before the real unsubscribe is assigned — guard against the temporal-dead-zone reference.
   let unsubscribe = (): void => {};
@@ -903,6 +1542,57 @@ function streamFromBus(res: ServerResponse, bus: ActivityBus): void {
     }
   });
   res.on("close", () => unsubscribe());
+}
+
+function combinedRunActivity(run: Record<string, unknown>, bus: ActivityBus, limit: number): Array<Record<string, unknown>> {
+  const events = [...persistedRunActivity(run, limit), ...bus.snapshot(limit).map((ev) => ({ ts: new Date().toISOString(), ...ev }))];
+  return events
+    .sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")))
+    .slice(-limit);
+}
+
+function persistedRunActivity(run: Record<string, unknown>, limit: number): Array<Record<string, unknown>> {
+  const runDir = typeof run.run_dir === "string" ? path.resolve(run.run_dir) : "";
+  if (!runDir) return [];
+  const file = path.join(runDir, "events.jsonl");
+  if (path.dirname(file) !== runDir) return [];
+  let lines: string[];
+  try {
+    lines = readFileSync(file, "utf8").trim().split(/\n+/).filter(Boolean);
+  } catch {
+    return [];
+  }
+  return lines.slice(-limit).flatMap((line) => {
+    try {
+      const rec = JSON.parse(line) as Record<string, unknown>;
+      return [persistedEventToActivity(rec)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function persistedEventToActivity(rec: Record<string, unknown>): Record<string, unknown> {
+  const kind = typeof rec.kind === "string" ? rec.kind : "event";
+  const detail =
+    typeof rec.error === "string" ? rec.error :
+    typeof rec.detail === "string" ? rec.detail :
+    typeof rec.text === "string" ? rec.text :
+    typeof rec.result === "string" ? rec.result :
+    typeof rec.name === "string" ? `wrote ${rec.name}` :
+    compactJson(omitKeys(rec, ["ts", "kind"]));
+  return { kind, ts: rec.ts, detail, ok: !/error|failed|refuted/i.test(kind) };
+}
+
+function omitKeys(input: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) if (!keys.includes(key)) out[key] = value;
+  return out;
+}
+
+function compactJson(value: unknown): string {
+  const text = JSON.stringify(value);
+  return text.length > 240 ? `${text.slice(0, 237)}...` : text;
 }
 
 // ---- daemon (execution-plane) handlers -----------------------------------------------
@@ -961,6 +1651,12 @@ async function daemonRunStart(c: Ctx): Promise<void> {
   const body = (await readBody(c.req)) as { jobId?: number; project?: string; kind?: RunKind; runDir?: string; provider?: string; model?: string; thinking?: string; budgets?: unknown };
   const name = (body.project ?? "").trim();
   if (!name || !body.runDir) return sendJson(c.res, 400, { error: "project and runDir are required" });
+  if (typeof body.jobId !== "number" || !Number.isFinite(body.jobId)) return sendJson(c.res, 400, { error: "jobId is required" });
+  const job = c.store.getJob(body.jobId);
+  if (!job) return sendJson(c.res, 404, { error: "no such job" });
+  if (job.daemon_id != null && Number(job.daemon_id) !== Number(daemon.id)) return sendJson(c.res, 403, { error: "job is assigned to another daemon" });
+  if (job.run_id != null) return sendJson(c.res, 200, { runId: Number(job.run_id), existing: true });
+  if (job.status !== "dispatched") return sendJson(c.res, 409, { error: "job must be claimed before starting a run" });
   const existing = c.store.getProject(name);
   const projectId = existing ? Number(existing.id) : c.store.upsertProject({ name, config: body.budgets });
   const runId = c.store.startRun({
@@ -972,7 +1668,7 @@ async function daemonRunStart(c: Ctx): Promise<void> {
     thinking: body.thinking,
     budgets: body.budgets,
   });
-  if (typeof body.jobId === "number") c.store.setJobRun(body.jobId, runId); // link job → run (so stop can find it)
+  c.store.setJobRun(body.jobId, runId); // link job → run (so stop can find it)
   sendJson(c.res, 200, { runId });
 }
 
@@ -982,6 +1678,7 @@ async function daemonRunUpdate(c: Ctx): Promise<void> {
   const runId = Number(c.params.id);
   const run = c.store.getRun(runId);
   if (!run) return sendJson(c.res, 404, { error: "no such run" });
+  if (run.status !== "running") return sendJson(c.res, 200, { ok: true, stale: true });
   const projectId = Number(run.project_id);
   const body = (await readBody(c.req)) as {
     scopes?: Parameters<MetadataStore["upsertScopes"]>[1];
@@ -1009,6 +1706,9 @@ async function daemonRunActivity(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
   const runId = Number(c.params.id);
+  const run = c.store.getRun(runId);
+  if (!run) return sendJson(c.res, 404, { error: "no such run" });
+  if (run.status !== "running") return sendJson(c.res, 200, { ok: true, stale: true });
   const body = (await readBody(c.req)) as { events?: Array<{ kind: string; delta?: string; tool?: string; step?: number }> };
   const bus = c.plane.bus(runId);
   for (const ev of body.events ?? []) bus.push(ev);
@@ -1021,6 +1721,10 @@ async function daemonJobStatus(c: Ctx): Promise<void> {
   const jobId = Number(c.params.id);
   const body = (await readBody(c.req)) as { status?: string; error?: string };
   const status = body.status ?? "done";
+  const before = c.store.getJob(jobId);
+  if (before && before.status === "canceled" && status !== "canceled") {
+    return sendJson(c.res, 200, { ok: true, stale: true });
+  }
   c.store.setJobStatus(jobId, status, body.error);
   // If the daemon died/aborted before its run reached a terminal state, reconcile the run.
   if (status === "error" || status === "canceled") {
@@ -1037,11 +1741,59 @@ async function daemonJobStatus(c: Ctx): Promise<void> {
 // ---- shared -----------------------------------------------------------------
 
 // In-flight jobs across all daemons, shaped for the dashboard's "active" list.
-function activeRuns(store: MetadataStore): Array<Record<string, unknown>> {
+function activeRuns(store: MetadataStore, plane?: ControlPlane): Array<Record<string, unknown>> {
   return store.runningJobs().map((job) => {
     const spec = safeParse(job.spec_json) as { verb?: string } | null;
-    return { jobId: job.id, runId: job.run_id ?? null, target: job.project, status: job.status, verb: spec?.verb ?? "run", startedAt: job.created_at };
+    const daemonId = typeof job.daemon_id === "number" ? job.daemon_id : undefined;
+    const onlineDaemons = daemonId !== undefined && plane ? plane.daemonCount(daemonId) : undefined;
+    const blockedReason = daemonId !== undefined && onlineDaemons === 0 ? "selected-daemon-offline" : undefined;
+    return {
+      jobId: job.id,
+      runId: job.run_id ?? null,
+      target: job.project,
+      status: job.status,
+      verb: spec?.verb ?? "run",
+      startedAt: job.created_at,
+      daemonId: daemonId ?? null,
+      ...(onlineDaemons !== undefined ? { onlineDaemons } : {}),
+      ...(blockedReason ? { blockedReason } : {}),
+    };
   });
+}
+
+function daemonRows(c: Ctx): Array<Record<string, unknown>> {
+  const includeRaw = c.url.searchParams.get("include") === "capabilities";
+  return c.store.listDaemons().map((daemon) => {
+    const parsed = safeParse(daemon.capabilities);
+    const online = c.plane.hasDaemon(Number(daemon.id));
+    if (includeRaw) return { ...daemon, online, capabilities: parsed ?? daemon.capabilities ?? null };
+    return { ...daemon, online, capabilities: summarizeDaemonCapabilities(parsed) };
+  });
+}
+
+function summarizeDaemonCapabilities(capabilities: unknown): Record<string, unknown> {
+  const providersRaw = capabilities && typeof capabilities === "object" && !Array.isArray(capabilities)
+    ? (capabilities as { providers?: unknown }).providers
+    : undefined;
+  const providers = Array.isArray(providersRaw)
+    ? providersRaw.flatMap((entry) => {
+        if (typeof entry === "string") return [{ provider: entry, configured: true, required: true }];
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const provider = (entry as { provider?: unknown }).provider;
+        if (typeof provider !== "string" || !provider.trim()) return [];
+        return [{
+          provider,
+          configured: Boolean((entry as { configured?: unknown }).configured),
+          required: Boolean((entry as { required?: unknown }).required),
+          oauthLogin: Boolean((entry as { oauthLogin?: unknown }).oauthLogin),
+        }];
+      })
+    : [];
+  return {
+    providers,
+    providerCount: providers.length,
+    configuredProviderCount: providers.filter((entry) => entry.configured).length,
+  };
 }
 
 function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> {
@@ -1049,6 +1801,7 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
   for (const job of store.runningJobs()) activeByTarget.set(String(job.project), (activeByTarget.get(String(job.project)) ?? 0) + 1);
   return store.listProjects().map((project) => {
     const id = Number(project.id);
+    const findings = reportableFindings(store.listFindings(id));
     return {
       id,
       uuid: project.uuid,
@@ -1058,8 +1811,8 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
       dir: project.dir ?? null,
       config: safeParse(project.config_json),
       progress: store.scopeProgress(id),
-      findingCounts: store.findingStatusCounts(id),
-      findingsTotal: store.countFindings(id),
+      findingCounts: findingCounts(findings),
+      findingsTotal: findings.length,
       confirmedBugs: store.countConfirmedBugs(id),
       runCount: store.countRuns(id),
       latestRun: store.latestRun(id) ?? null,
@@ -1068,7 +1821,7 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
   });
 }
 
-function streamSnapshots(res: ServerResponse, store: MetadataStore): void {
+function streamSnapshots(res: ServerResponse, store: MetadataStore, plane: ControlPlane): void {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   const timer = setInterval(tick, 1200);
   res.on("close", () => clearInterval(timer));
@@ -1076,7 +1829,7 @@ function streamSnapshots(res: ServerResponse, store: MetadataStore): void {
   // A throw here (closed socket, or a transient store read error) must not crash the server.
   function tick(): void {
     try {
-      res.write(`data: ${JSON.stringify({ projects: projectSnapshots(store), active: activeRuns(store) })}\n\n`);
+      res.write(`data: ${JSON.stringify({ projects: projectSnapshots(store), active: activeRuns(store, plane) })}\n\n`);
     } catch {
       clearInterval(timer);
     }
@@ -1106,7 +1859,7 @@ function phaseProviderProfiles(project: Record<string, unknown>, store: Metadata
 function launchSpec(project: Record<string, unknown>, body: Record<string, unknown>, out: string, profile?: ProviderProfile, progress?: Coverage, phaseProfiles: PhaseProfiles = {}): LaunchSpec {
   const cfg = (safeParse(project.config_json) as Record<string, unknown>) ?? {};
   const overrides = (body.overrides as Record<string, unknown>) ?? {};
-  const merged = { ...cfg, ...((overrides.config as Record<string, unknown>) ?? {}) };
+  const merged = { ...cfg, ...((overrides.config as Record<string, unknown>) ?? {}), ...runBodyConfigOverrides(body) };
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
   const backend = (v: unknown): "auto" | "oci" | "host" | undefined => (v === "auto" || v === "oci" || v === "host" ? v : undefined);
@@ -1182,6 +1935,29 @@ function launchSpec(project: Record<string, unknown>, body: Record<string, unkno
     endpoint: str(body.endpoint),
     out,
   };
+}
+
+function runBodyConfigOverrides(body: Record<string, unknown>): Record<string, unknown> {
+  const keys = [
+    "scopeCoverageMode",
+    "maxScopes",
+    "mapSteps",
+    "digSteps",
+    "maxSteps",
+    "digSamples",
+    "digConcurrency",
+    "sandboxBackend",
+    "sandboxImage",
+    "sandboxAllowHostFallback",
+    "sandboxPrepareNetwork",
+    "sandboxConfirmNetwork",
+    "sandboxMemoryMb",
+    "sandboxCpus",
+    "scopeNote",
+  ];
+  const out: Record<string, unknown> = {};
+  for (const key of keys) if (body[key] !== undefined) out[key] = body[key];
+  return out;
 }
 
 function resolveMaxScopes(cfg: Record<string, unknown>, progress?: Coverage): number | undefined {

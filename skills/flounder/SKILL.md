@@ -46,6 +46,9 @@ confirm the skill is discoverable before installing.
 - Confirm authorization and scope before running an audit.
 - Keep provider credentials daemon-local. The server stores provider profiles;
   daemons own provider login, API keys, target source, and execution.
+- Treat `~/.flounder` as the default product home: tracking DB, run artifacts,
+  durable history/build cache, daemon workspace, and daemon-local provider auth
+  live there unless the user explicitly passes `--out` or `--workspace`.
 - Start with `flounder ui` unless the user already has a control plane running.
   CLI verbs are thin clients of that control plane.
 - Use `GET /api` before driving the REST API directly; the catalog is the source
@@ -88,7 +91,7 @@ confirm the skill is discoverable before installing.
    `flounder server daemon-token mint`, then run:
 
    ```bash
-   flounder daemon --server http://<server>:4500 --token <token>
+   flounder daemon start --server http://<server>:4500 --token <token>
    ```
 
 3. Authenticate every provider that the selected daemon will run:
@@ -97,6 +100,12 @@ confirm the skill is discoverable before installing.
    flounder daemon provider login openai-codex
    flounder daemon provider check openai-codex
    ```
+
+   For `openai-codex`, this is how the agent asks the user to authenticate.
+   Run the login command in the terminal; it prints a browser URL or device-code
+   instructions, the user completes the login, and then `check` verifies it. If
+   pi already has `openai-codex` in `~/.pi/agent/auth.json`, Flounder imports
+   that provider entry into `~/.flounder/agent/auth.json` on login/check.
 
 4. Ensure the execution sandbox is available on the daemon machine. For real
    audits, install and start Docker or a Docker-compatible runtime, then build

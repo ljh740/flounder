@@ -7,8 +7,9 @@ import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../di
 import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, ingestFindingsFromScratch, newSession, dedupeFindings } from "../dist/agent/tools.js";
 import { runAudit } from "../dist/agent/audit.js";
+import { normalizePrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
-import { buildDeepKickoff, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
+import { buildDeepKickoff, buildMapKickoff, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
 import { runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
 import { buildSessionPrompt, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapThinkingLevel, toolSchemas } from "../dist/agent/pi-session.js";
@@ -57,15 +58,63 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   for (const prompt of [AUDIT_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_VERIFY_SYSTEM]) {
     assert.ok(prompt.includes(POC_TRUST_RULE), "legacy loop prompt is missing the shared PoC trust rule");
   }
+  assert.ok(AUDIT_SYSTEM.includes("findings.json is not an audit notebook"), "legacy prompt should keep audit notes out of findings");
+  assert.ok(AUDIT_DEEP_SYSTEM.includes("Discharged-with-line obligations are useful reasoning, but they are not findings"), "legacy deep prompt should not emit safe obligations as findings");
 
   const sessionPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs" });
   assert.ok(sessionPrompt.includes(POC_TRUST_RULE), "real pi session prompt is missing the shared PoC trust rule");
   assert.ok(sessionPrompt.includes('purpose="build"'), "real pi session prompt should expose build-purpose commands");
+  assert.ok(sessionPrompt.includes("findings.json is not a work log"), "findings should not be used as an audit notebook");
+  assert.ok(sessionPrompt.includes("Do NOT write safe/no-issue notes"), "session prompt should keep no-issue ledgers out of findings");
   assert.ok(JSON.stringify(toolSchemas.bash).includes('"build"'), "pi custom tool schema should allow purpose=build");
-  assert.ok(FINDINGS_FINALIZE_PROMPT.includes("already ran a purpose=confirm command that passed"), "finalize should preserve already-executed confirmations");
+  assert.ok(FINDINGS_FINALIZE_PROMPT.includes("already-passing purpose=confirm command_id"), "finalize should preserve already-executed confirmations");
+  assert.ok(FINDINGS_FINALIZE_PROMPT.includes("If you found no actionable bug, write [] exactly"), "finalize should avoid fabricating info-only findings");
 
   const mapPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", map: true });
   assert.ok(!mapPrompt.includes("Record candidates by writing findings.json"), "map prompt should not inherit findings-report instructions");
+  for (const prompt of [
+    MAP_SYSTEM,
+    mapPrompt,
+    buildMapKickoff({ target: "t", tools: [], fileManifest: "x.rs", maxSteps: Number.POSITIVE_INFINITY }),
+  ]) {
+    assert.ok(prompt.includes(MAP_GRANULARITY_RULES), "map prompt should carry the shared granularity rules");
+    assert.ok(prompt.includes("dig batch cap"), "map prompt should state that dig caps do not limit map inventory");
+    assert.ok(prompt.includes("10 inspect commands"), "map prompt should force an early scope checkpoint before broad exploration drifts too long");
+    assert.ok(prompt.includes("not completion") || prompt.includes("final completeness pass"), "map prompt should treat early scopes.json writes as checkpoints");
+    assert.ok(prompt.includes("expansion pass") || prompt.includes("final completeness pass"), "map prompt should require a final expansion pass before done");
+  }
+
+  const deepPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", deep: true });
+  assert.ok(!deepPrompt.includes("Record every obligation and its status to findings.json"), "deep prompt should not put discharged obligations into findings");
+  assert.ok(deepPrompt.includes("discharged obligations are not findings"), "deep prompt should keep safe obligation notes out of findings");
+
+  const preparePrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "(empty)", prepare: "Clue: official source" });
+  assert.ok(preparePrompt.includes("Write prepare_manifest.json EARLY"), "prepare should persist a usable manifest before chasing long-tail dependencies");
+  assert.ok(preparePrompt.includes("ordinary package-manager dependency"), "prepare should not chase every package dependency when manifests can resolve them");
+  assert.ok(preparePrompt.includes("stop once the sealed audit has enough neutral material"), "prepare needs explicit stop criteria");
+  assert.ok(preparePrompt.includes("Do NOT audit yet"), "prepare should not spend the acquisition phase hunting bugs");
+  assert.ok(preparePrompt.includes("leave all bug discovery to map/dig"), "prepare should preserve the blind audit boundary");
+});
+
+test("prepare manifest normalization turns ended in-progress manifests into terminal states", () => {
+  const clean = normalizePrepareManifest(
+    { clue: "official source", components: [{ identity: "repo", platform: "none", revision: "abc", match: "n/a" }] },
+    { components: 1, matched: 0, unverified: 0, sourcePinned: 1, issues: [] },
+  );
+  assert.equal(clean.status, "complete");
+
+  const partial = normalizePrepareManifest(
+    { status: "in_progress", gaps: [{ id: "deployment", status: "open" }], components: [] },
+    { components: 0, matched: 0, unverified: 0, sourcePinned: 0, issues: ["manifest lists no components"] },
+  );
+  assert.equal(partial.status, "partial");
+  assert.match(partial.status_reason, /unresolved gaps|validation issues/);
+
+  const existing = normalizePrepareManifest(
+    { status: "verified", gaps: [{ id: "old", status: "open" }] },
+    { components: 0, matched: 0, unverified: 0, sourcePinned: 0, issues: ["ignored"] },
+  );
+  assert.equal(existing.status, "verified");
 });
 
 test("project memory persists notes and recalls by keyword overlap", async () => {
@@ -213,6 +262,13 @@ test("prepare/confirm report files may cite public URLs while generated PoC file
     }, ctx);
     assert.match(poc.observation, /blocked/i);
     assert.match(poc.observation, /remote URLs/i);
+
+    cfg.prepareMode = true;
+    const helper = await tool("write").run({
+      path: "fetch_release_info.py",
+      content: "URL = 'https://api.github.com/repos/official/project/releases'\nprint(URL)\n",
+    }, ctx);
+    assert.match(helper.observation, /wrote fetch_release_info\.py/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -574,6 +630,9 @@ test("audit produces an execution-confirmed finding and banks cross-run memory",
     // Run artifacts must stay free of machine-absolute source paths.
     const report = await readFile(path.join(runDir, "report_f1.md"), "utf8");
     assert.ok(!report.includes(root), "reports must not leak local absolute paths");
+    assert.ok(report.includes("Local executable evidence:"), "confirmed reports should show local execution evidence");
+    assert.ok(report.includes("Confirmation command:"), "confirmed reports should cite the command id");
+    assert.ok(!report.includes("Executable reproduction not generated"), "confirmed reports should not claim the PoC is missing");
 
     // Memory persisted under project history for the next run.
     const memoryPath = path.join(cfg.outputDir, "history", "agent-e2e", "memory.jsonl");
@@ -615,6 +674,118 @@ test("map → dig: --deep enumerates scopes then deep-audits each, tagging findi
     assert.equal(summary.findings[0].confirmationStatus, "confirmed-executable");
     const findingsArtifact = JSON.parse(await readFile(path.join(runDir, "audit_findings.json"), "utf8"));
     assert.equal(findingsArtifact[0].scopeId, "S1", "dig findings are tagged with the scope they came from");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("map → dig: a running sequential batch can shrink its scope target at a scope boundary", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.targetName = "mapdig-adjust-e2e";
+    cfg.sourcePaths = [fixtures];
+    cfg.corpusPaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditDeep = true;
+    cfg.auditSynthesize = false;
+    cfg.auditMapSteps = 6;
+    cfg.auditDigSteps = 8;
+    cfg.auditMaxScopes = 2;
+    cfg.auditDigConcurrency = 1;
+
+    let liveTarget = 2;
+    const runScopes = [];
+    const tracker = {
+      runDbId: undefined,
+      scopes() {},
+      runScopes(done, target) {
+        runScopes.push({ done, target });
+        if (done === 0 && target === 2) liveTarget = 1;
+      },
+      findings() {},
+      stage() {},
+      confirmDecisions() {},
+      finish() {},
+    };
+
+    const { runDir, scopeCoverage } = await runAudit(cfg, {
+      llm: new MockAuditLlmClient(),
+      control: { getRunScopesTarget: () => liveTarget },
+      makeTracker: () => tracker,
+    });
+
+    const scopes = JSON.parse(await readFile(path.join(runDir, "audit_scopes.json"), "utf8"));
+    assert.equal(scopes.find((s) => s.id === "S1").status, "audited");
+    assert.equal(scopes.find((s) => s.id === "S2").status, "pending", "scope past the adjusted target stays pending");
+    assert.deepEqual(scopeCoverage, { total: 2, audited: 1, pending: 1, deferred: 0 });
+    assert.ok(runScopes.some((row) => row.done === 0 && row.target === 1), "tracker sees the adjusted target before the next scope starts");
+    assert.ok(runScopes.some((row) => row.done === 1 && row.target === 1), "final batch progress reflects the adjusted target");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("map → dig: stopping during a scope requeues the in-flight scope", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.targetName = "mapdig-stop-e2e";
+    cfg.sourcePaths = [fixtures];
+    cfg.corpusPaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditDeep = true;
+    cfg.auditSynthesize = false;
+    cfg.auditMapSteps = 6;
+    cfg.auditDigSteps = 8;
+    cfg.auditMaxScopes = 1;
+
+    const abort = new AbortController();
+    const tracker = {
+      runDbId: undefined,
+      scopes(scopes) {
+        if (scopes.some((scope) => scope.id === "S1" && scope.status === "auditing")) abort.abort();
+      },
+      runScopes() {},
+      findings() {},
+      stage() {},
+      confirmDecisions() {},
+      finish() {},
+    };
+
+    await assert.rejects(
+      runAudit(cfg, { llm: new MockAuditLlmClient(), signal: abort.signal, makeTracker: () => tracker }),
+      /audit aborted/,
+    );
+
+    const inventoryPath = path.join(cfg.outputDir, "history", "mapdig-stop-e2e", "scopes.json");
+    const scopes = JSON.parse(await readFile(inventoryPath, "utf8"));
+    assert.equal(scopes.find((scope) => scope.id === "S1")?.status, "pending", "a stopped in-flight scope must not stay auditing");
+    assert.equal(scopes.find((scope) => scope.id === "S2")?.status, "pending");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("verify mode inherits the original finding scope", async () => {
+  const dir = await tempDir();
+  try {
+    const verifyFile = path.join(dir, "to-verify.json");
+    await writeFile(verifyFile, JSON.stringify([{ title: "candidate", location: "halo2_missing_constraint.rs:5", severity: "high", description: "lead", scope_id: "SCOPE-7" }]), "utf8");
+
+    const cfg = defaultConfig();
+    cfg.targetName = "verify-scope-e2e";
+    cfg.sourcePaths = [fixtures];
+    cfg.corpusPaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditVerify = verifyFile;
+    cfg.auditDigSteps = 8;
+    cfg.auditSynthesize = false;
+
+    const { runDir } = await runAudit(cfg, { llm: new MockAuditLlmClient() });
+
+    const findings = JSON.parse(await readFile(path.join(runDir, "audit_findings.json"), "utf8"));
+    assert.equal(findings[0]?.scopeId, "SCOPE-7", "verify verdict should keep the candidate's scope linkage");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

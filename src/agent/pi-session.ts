@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { LlmClient } from "../types.js";
-import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
+import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, MAP_GRANULARITY_RULES, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
 import { describeAction, readScratchScopes, scratchHasFindings, type AgentTool, type ToolContext } from "./tools.js";
 import { flounderAgentDir } from "../provider-auth.js";
 
@@ -339,6 +339,7 @@ export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: stri
     : `
 How to report:
 - Record candidates by writing findings.json at the workspace root: a JSON array of objects with fields title, severity (info|low|medium|high|critical), location ("file:line"), description, evidence, exploit_sketch, fix, confidence (0..1), and optionally command_id.
+- findings.json is not a work log. Write only credible unmet obligations, suspected bugs, and confirmed bugs. Do NOT write safe/no-issue notes, discharged obligations, ranked shortlist notes, or obligation-ledger entries to findings.json. If this pass found no actionable bug, write [].
 - The one hard rule the framework enforces: a claim is only confirmed-executable if it cites command_id of a purpose=confirm bash run that actually passed. Everything else is recorded as an unconfirmed hypothesis.
 - A confirm test must exercise the ACTUAL vulnerable code path: construct the malicious input or condition and show the code accepts it or the invariant breaks. A test that merely prints a success string without triggering the bug proves nothing — do not cite it. The dependency toolchain is prepared automatically on your first test run, so allow extra time for that first compile.
 ${POC_TRUST_RULE}
@@ -370,17 +371,19 @@ Loaded source files:
 ${input.fileManifest}
 
 ${input.map
-    ? "Apply the three lenses and write scopes.json — the COMPLETE scope inventory (each: id, obligation, region, lenses, exposure, difficulty, score, why) — then stop. Do not deep-dive or prove bugs in this phase; coverage over depth."
+    ? `Apply the three lenses and write scopes.json early as a checkpoint, then keep expanding and splitting it until it is the COMPLETE scope inventory (each: id, obligation, region, lenses, exposure, difficulty, score, why). Do not deep-dive or prove bugs in this phase; coverage over depth. Emit done only after a final completeness pass over the loaded first-party tree.
+
+${MAP_GRANULARITY_RULES}`
     : input.synthesize
       ? "Begin the sink-driven synthesis: enumerate the security-critical sinks, trace each backward across components for an input that arrives un-bound to a legitimate authority, compose the cross-component chains, and write findings.json (each composed exploit with its entry → unbound input → sink links and confirmation). Do not just re-list the per-scope findings."
       : input.deep
-        ? "Begin the obligation-driven method: model the system, rank and commit to the most soundness-critical region (unless one is pinned above), then enumerate its obligations from design intent and discharge each by naming the enforcing line or flagging its absence. Record every obligation and its status to findings.json. Do not wrap up while obligations remain unchecked."
-        : "Begin the audit. When you have investigated thoroughly and written findings.json, stop."}`;
+        ? "Begin the obligation-driven method: model the system, rank and commit to the most soundness-critical region (unless one is pinned above), then enumerate its obligations from design intent and discharge each by naming the enforcing line or flagging its absence. Write only UNMET or uncertain obligations with a concrete missing edge to findings.json; discharged obligations are not findings. Do not wrap up while obligations remain unchecked."
+        : "Begin the audit. When you have investigated thoroughly, write findings.json with only actionable suspected/confirmed bugs (or [] if none), then stop."}`;
 }
 
-const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering the most soundness-critical regions you saw under the three general lenses: spec conditions, value/asset flow, and trusted-but-unbound inputs. Partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
+const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering every concrete scope you identified under the three general lenses: spec conditions, value/asset flow, and trusted-but-unbound inputs. If a scope covers multiple independent gates, proof boundaries, invariants, or attacker-controlled inputs, split it before writing. Partial but broad beats empty; do not collapse the inventory into a shortlist or a 30-scope dig batch. After writing, emit {"done": true}. Output only the write tool call.`;
 
-export const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis and command results you have already produced, WRITE findings.json now at the workspace root as your very next action — call the write tool once with the obligations you enumerated for this region and EACH one's status: discharged (state the exact enforcing line), suspected (state root cause, exact location, attacker impact, and a fix), or confirmed only if you already ran a purpose=confirm command that passed and actually exercised the vulnerable path. Do NOT invent a confirmation now and do NOT mark anything confirmed by assertion; confirmed entries must cite that already-passing command_id. Persisting your suspected/discharged/confirmed analysis is the goal; partial but concrete beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
+export const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis and command results you have already produced, WRITE findings.json now at the workspace root as your very next action — call the write tool once with ONLY actionable findings: UNMET obligations, concrete suspected bugs, and confirmed bugs that cite an already-passing purpose=confirm command_id. Do NOT include discharged/safe/no-issue obligations, ranked shortlist notes, or obligation ledgers. If you found no actionable bug, write [] exactly. Do NOT invent a confirmation and DO NOT mark anything confirmed by assertion. After writing, emit {"done": true}. Output only the write tool call.`;
 
 const PREPARE_FINALIZE_PROMPT = `Your budget is spent. Do NOT fetch or run anything else. WRITE prepare_manifest.json now at the workspace root as your very next action — call the write tool once with an object: {"clue","posture","match_deployed"(bool),"scope_declaration":"<where the in-scope set came from: the audited addresses and/or the project's own scope doc>","components":[{"role":"target|dependency|implementation|verifier|other","identity":"<address / package / path / etc.>","platform":"<chain / registry / host, or 'none'>","revision":"<block / version / commit / digest>","source":"<verified|published|repo@commit|unverified>","staged_path":"<workspace-relative path/glob of this component's code>","in_scope":(bool),"scope_basis":"deployed-match|project-scope-doc|first-party|dependency|off-deployment-boundary","match":"matched|unverified|n/a","match_evidence"}],"offscope":[{"kind":"circuit|spec|docs|prior-audit|other","resolved":(bool),"where","note"}],"gaps":[...],"answer_firewall":"clean|flagged: ...","notes"}. Record honestly: a deployed component you could not match is "unverified"; a non-deployed one is "n/a" with its source origin pinned; in_scope=true for the deployment-matched target / project-declared in-scope / first-party code, false for third-party deps and off-deployment trust boundaries (a FACT from deployment + the project's scope, not a guess about bugs); anything you could not find is a gap, not a guess. After writing, emit {"done": true}. Output only the write tool call.`;
 
@@ -396,7 +399,7 @@ ${input.fileManifest}
 Durable memory from prior prepares of this target:
 ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim() : "(empty)"}
 
-Begin: resolve the clue, walk the on-chain graph, fetch and mainnet-match the source, record gaps, then write prepare_manifest.json.`;
+Begin: resolve the clue, stage the target/security-critical source and official answer-free docs, mainnet-match or source-pin each component, write prepare_manifest.json early, record gaps honestly, and stop once the sealed audit has enough neutral material to proceed.`;
 }
 
 const CONFIRM_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, fork, fetch, or run anything else. Based ONLY on what you have already reproduced, WRITE confirm_decision.json now at the workspace root as your very next action — call the write tool once with a JSON array, one row per DISTINCT bug: {"bug","members":[...],"distinct_fix","reproduced":"yes"|"no"|"could-not-set-up","repro_evidence","repro_command_id","fix_patch":{"path","old","new"},"patched_success_patterns":[...],"corroboration","novelty","human_gates","recommendation":"submit-candidate"|"needs-human"|"drop"}. Mark "reproduced":"yes" ONLY for a bug you actually reproduced on the real target with a passing command_id; otherwise "no"/"could-not-set-up" with the crutch/blocker named. Include repro_command_id + fix_patch + patched_success_patterns for any source-level PoC so the framework can verify consolidation by execution. Partial but honest beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
@@ -443,7 +446,9 @@ Apply THREE lenses (general method, not a hint about this target); be exhaustive
 
 Do not judge importance by gut feel or "looks like a bug". A region whose link to the asset is indirect (e.g. a key/address-integrity check that only matters because breaking it enables a later double-spend) MUST still be listed — those are exactly what a rank-and-pick misses. Assign each scope: exposure (critical|high|medium|low, by asset at risk), difficulty (high|medium|low, how hard to be sure it is correct), score (0-10, only to order the dig phase; low score defers, never drops).
 
-Write scopes.json at the workspace root EARLY — after a first broad pass — then UPDATE it (rewrite the full array) as you find more, so a complete-as-of-now inventory survives if you run out of budget. It is a JSON array of {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"}. On a large codebase do NOT read every file first — use bash (ls/grep for public/external entrypoints, state writes, value transfers) to enumerate, and spend little per scope (broad and shallow). You CANNOT modify the target source.`;
+${MAP_GRANULARITY_RULES}
+
+Write scopes.json at the workspace root EARLY — after the initial directory/entrypoint scan, and no later than 10 inspect commands — then UPDATE it (rewrite the full array) as you find more, so a complete-as-of-now inventory survives if you run out of budget. The first write is a checkpoint, not completion. Do not stop at 30 scopes or any dig-batch cap; those caps apply only after mapping. It is a JSON array of {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"}. On a large codebase do NOT read every file first — use bash (ls/grep for public/external entrypoints, state writes, value transfers) to enumerate, and spend little per scope (broad and shallow). Before done, make a final expansion pass over the first-party tree, split broad scopes, update scopes.json, and only then stop. You CANNOT modify the target source.`;
 }
 
 function breadthIntro(): string {
@@ -460,14 +465,14 @@ function deepIntro(deepFocus?: string): string {
   return `You are an autonomous white-hat security auditor performing a DEEP, NARROW-SCOPE audit of AUTHORIZED source code copied into your working directory.
 This is NOT a breadth survey. You are auditing a small, high-criticality slice to a much higher standard of rigor: either prove it enforces every security property it is responsible for, or find the exact point where it does not.
 
-${focus ? `Focus region (pinned): ${focus}. Audit this region.` : "No focus is pinned: first model the system and RANK the most soundness-critical region (a region is critical when a top-level balance/supply/authorization/uniqueness/integrity property the whole system depends on is ENFORCED there), commit your budget to it, and record your ranked shortlist to findings.json early."}
+${focus ? `Focus region (pinned): ${focus}. Audit this region.` : "No focus is pinned: first model the system and RANK the most soundness-critical region (a region is critical when a top-level balance/supply/authorization/uniqueness/integrity property the whole system depends on is ENFORCED there), commit your budget to it, and keep the ranked shortlist in the transcript. Do not write shortlist notes to findings.json."}
 
 Obligation-driven method (general, not a hint about this target):
 - ENUMERATE obligations from DESIGN INTENT, not the code's appearance. Read the design material under corpus/ and the higher-level code that USES this region to determine what it is SUPPOSED to guarantee. Write each obligation explicitly as "value/relationship X must equal/hold Y for property P". The code cannot tell you what it should enforce; the intent does.
 - DISCHARGE each obligation one at a time. Finding that "a constraint exists" is NOT discharge: state exactly what the constraint binds the value to and confirm that referent is the value the obligation actually requires — not merely an adjacent/internal value, and not merely a relationship among witnessed values when the property names a specific trusted source. A value bound to the wrong referent leaves the obligation UNMET.
 - At serialization, ABI, FFI, proof, and transcript boundaries, discharge includes one-to-one interpretation: exact length, canonical/range-checked encoding, correct domain/modulus/units, and no silent normalization that changes the statement being checked.
 - A MISSING enforcing constraint is the finding. Missing-constraint bugs look like ordinary assignment/witnessing on every line — reason from the obligation, never from whether the code "looks standard", "matches upstream", or is "the canonical implementation" (the reference can carry the same bug; some bugs live in the canonical code itself).
-- Record every obligation and its status (discharged-with-line / UNMET / uncertain) to findings.json as you go; an UNMET obligation is a finding (or a hypothesis with location and the exact missing edge).`;
+- Write only UNMET or uncertain obligations with a concrete missing edge to findings.json. Discharged-with-line obligations are reasoning, not findings; keep them in the transcript and do not write them to findings.json.`;
 }
 
 function synthesizeIntro(seed: string): string {

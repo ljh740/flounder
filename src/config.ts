@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import type { ProjectContext } from "./types.js";
 import type { SandboxBackend, SandboxExecutionOptions, SandboxNetworkMode } from "./security/sandbox.js";
 
@@ -111,6 +113,18 @@ export interface RoleModel {
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 
+export function flounderHomeDir(): string {
+  return path.join(os.homedir(), ".flounder");
+}
+
+export function defaultOutputDir(): string {
+  return flounderHomeDir();
+}
+
+export function defaultWorkspaceDir(): string {
+  return path.join(flounderHomeDir(), "workspace");
+}
+
 /** Resolve the effective model for a phase: role entry → `default` entry → top-level config. */
 export function resolveRole(cfg: AuditorConfig, role: AuditRole): RoleModel {
   const roleCfg = cfg.models?.[role] ?? {};
@@ -152,7 +166,7 @@ export function defaultConfig(): AuditorConfig {
     targetName: "target",
     sourcePaths: [],
     corpusPaths: [],
-    outputDir: "runs",
+    outputDir: defaultOutputDir(),
     provider: "openai-codex",
     auditModel: "gpt-5.5",
     maxTokens: 8000,
@@ -166,14 +180,14 @@ export function defaultConfig(): AuditorConfig {
     sandboxAllowHostFallback: process.env.FLOUNDER_ALLOW_HOST_EXECUTION === "1",
     sandboxPrepareNetwork: readSandboxNetwork(process.env.FLOUNDER_PREPARE_NETWORK) ?? "enabled",
     sandboxConfirmNetwork: readSandboxNetwork(process.env.FLOUNDER_CONFIRM_NETWORK) ?? "enabled",
-    auditMaxSteps: 40,
+    auditMaxSteps: Number.POSITIVE_INFINITY,
     auditPrepare: true,
     auditPrepareTimeoutMs: 600_000,
     auditRefute: true,
     auditAppeal: true,
     auditDeep: false,
-    auditMapSteps: 20,
-    auditDigSteps: 30,
+    auditMapSteps: Number.POSITIVE_INFINITY,
+    auditDigSteps: Number.POSITIVE_INFINITY,
     auditMaxScopes: 30,
     auditDigSamples: 1,
     auditDigConcurrency: 1,

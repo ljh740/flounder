@@ -86,8 +86,15 @@ flounder daemon provider check openai-codex
 
 # For a daemon on another machine, mint a control-plane token first.
 flounder server daemon-token mint remote-1
-flounder daemon --server http://<server>:4500 --token <token>
+flounder daemon start --server http://<server>:4500 --token <token>
 ```
+
+`openai-codex` uses pi subscription/OAuth auth. An agent can trigger the user
+login by running `flounder daemon provider login openai-codex`; the command
+prints a browser URL or device-code instructions for the user to complete. If
+the same provider is already logged in through pi at `~/.pi/agent/auth.json`,
+Flounder imports that provider entry into its daemon-local auth file on
+`login`/`check`.
 
 Then create a project in the dashboard, choose its execution daemon and default provider profile, and start a run. The CLI can drive the same control plane:
 
@@ -99,7 +106,7 @@ flounder run <tx-or-address-or-project-or-repo-or-link>
 flounder run --target my-target --source ./src --build-root . --corpus ./docs
 
 # Confirm a finished run against real-world ground truth.
-flounder confirm ./runs/my-target-<timestamp> --source ./src --build-root .
+flounder confirm ~/.flounder/my-target-<timestamp> --source ./src --build-root .
 ```
 
 `--mock-llm` runs offline for development. See [docs/USAGE.md](docs/USAGE.md) for commands, materials, daemon setup, provider profiles, budgets, and the API.
@@ -158,7 +165,17 @@ A finding's status is the framework's verdict from execution:
 
 ## Outputs
 
-A run produces private artifacts under the output directory:
+A run produces private artifacts under the output directory. By default, Flounder keeps local state under `~/.flounder`:
+
+- `~/.flounder/flounder.db`: local tracking database for projects, runs, findings, daemon tokens, and jobs.
+- `~/.flounder/<target>-<timestamp>/`: run artifacts, copied workspaces, logs, transcripts, findings, and reports.
+- `~/.flounder/history/<target>/`: durable memory, scope inventory, build cache, and project history.
+- `~/.flounder/workspace/`: default daemon workspace for project directories.
+- `~/.flounder/agent/auth.json`: daemon-local provider auth, created by `flounder daemon provider login` or imported from an existing pi auth entry.
+
+System temp directories are used only for short-lived scratch such as non-interactive CLI subprocess working directories or inline verify payloads; they are not the default tracking store.
+
+A run artifact directory contains:
 
 - scope inventory and coverage (`audit_scopes.json`, `summary.json`)
 - findings and hypotheses (`audit_findings.json`, `audit_hypotheses.json`)

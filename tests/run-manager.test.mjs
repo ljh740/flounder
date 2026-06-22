@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { buildArgs, specToConfig, ActivityBus } from "../dist/server/run-manager.js";
 import { MetadataStore } from "../dist/db/store.js";
+import { defaultOutputDir } from "../dist/config.js";
 
 test("ActivityBus: a subscriber replays backlog then receives live events", () => {
   const bus = new ActivityBus();
@@ -18,6 +19,15 @@ test("ActivityBus: a subscriber replays backlog then receives live events", () =
   unsub();
   bus.push({ kind: "thinking_delta", delta: "x" });
   assert.equal(seen.length, 3); // no events after unsubscribe
+});
+
+test("ActivityBus: snapshot returns a bounded recent tail", () => {
+  const bus = new ActivityBus();
+  bus.push({ kind: "step", step: 1, tool: "read" });
+  bus.push({ kind: "step", step: 2, tool: "bash" });
+  bus.push({ kind: "thinking_delta", delta: "done" });
+  assert.deepEqual(bus.snapshot(2).map((ev) => ev.tool ?? ev.delta), ["bash", "done"]);
+  assert.deepEqual(bus.snapshot(10).map((ev) => ev.kind), ["step", "step", "thinking_delta"]);
 });
 
 // buildArgs is the pure core of launching: spec -> flounder CLI argv. The run-manager shells out
@@ -95,7 +105,7 @@ test("buildArgs/specToConfig: sandbox isolation settings round-trip through laun
     "--confirm-network", "none",
     "--sandbox-memory-mb", "2048",
     "--sandbox-cpus", "1.5",
-    "--out", "runs",
+    "--out", defaultOutputDir(),
   ]);
 
   const cfg = specToConfig(spec, "runs");

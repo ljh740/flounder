@@ -1,5 +1,5 @@
 import { isToolCallEventType, type ExtensionAPI, type ToolCallEvent, type UserBashEvent } from "@earendil-works/pi-coding-agent";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
@@ -326,8 +326,10 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
     async execute(_toolCallId, params) {
       const cfg = configured(params);
       applyAuditBudgets(cfg, params);
+      let verifyTempDir: string | undefined;
       if (params.verifyFindings !== undefined) {
         const dir = await mkdtemp(path.join(tmpdir(), "flounder-verify-"));
+        verifyTempDir = dir;
         const file = path.join(dir, "findings.json");
         await writeFile(file, JSON.stringify(params.verifyFindings), "utf8");
         cfg.auditVerify = file;
@@ -341,12 +343,16 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
           if (scope) cfg.auditScopeIds = scope.split(",").map((item) => item.trim()).filter(Boolean);
         }
       }
-      const result = await runAudit(cfg, { kind: "audit" });
-      const confirmed = confirmedCount(result.summary.findings);
-      return {
-        content: [{ type: "text", text: `${summaryLine(result.runDir, result.summary.findings.length, confirmed)}${result.scopeCoverage ? `\nScopes: ${result.scopeCoverage.audited}/${result.scopeCoverage.total} audited (${result.scopeCoverage.pending} pending)` : ""}` }],
-        details: details(result),
-      };
+      try {
+        const result = await runAudit(cfg, { kind: "audit" });
+        const confirmed = confirmedCount(result.summary.findings);
+        return {
+          content: [{ type: "text", text: `${summaryLine(result.runDir, result.summary.findings.length, confirmed)}${result.scopeCoverage ? `\nScopes: ${result.scopeCoverage.audited}/${result.scopeCoverage.total} audited (${result.scopeCoverage.pending} pending)` : ""}` }],
+          details: details(result),
+        };
+      } finally {
+        if (verifyTempDir) await rm(verifyTempDir, { recursive: true, force: true });
+      }
     },
   });
 

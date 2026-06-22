@@ -41,7 +41,7 @@ During `flounder run` the command policy blocks public-network broadcast, transf
 EVM is `flounder confirm`'s strongest path: a `forge test --fork-url <mainnet>` reproduces a finding against the **real deployed contract and its real configured components** at a chosen block. After a run, point confirm at it:
 
 ```bash
-flounder confirm ./runs/protocol-contract-audit-<timestamp> \
+flounder confirm ~/.flounder/protocol-contract-audit-<timestamp> \
   --source <target>/src --build-root <target> \
   --provider openai-codex
 ```

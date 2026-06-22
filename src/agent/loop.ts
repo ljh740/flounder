@@ -44,7 +44,8 @@ export async function runAuditLoop(input: {
   // An unbounded budget (the sealed verbs' default) is capped to a large finite ceiling
   // here so this legacy/mock loop cannot spin forever if a model never emits done; the
   // continuous pi-session driver (used for real runs) handles non-finite budgets natively.
-  const maxSteps = Number.isFinite(input.maxSteps) ? input.maxSteps : 100000;
+  const unboundedSteps = !Number.isFinite(input.maxSteps);
+  const maxSteps = unboundedSteps ? 100000 : input.maxSteps;
   const systemPrompt = input.confirm ? AUDIT_CONFIRM_SYSTEM : input.synthesize ? AUDIT_SYNTHESIS_SYSTEM : input.verify ? AUDIT_VERIFY_SYSTEM : input.map ? MAP_SYSTEM : input.deep ? AUDIT_DEEP_SYSTEM : AUDIT_SYSTEM;
   const toolsByName = new Map(input.tools.map((tool) => [tool.name, tool]));
   const kickoffCommon = {
@@ -69,7 +70,7 @@ export async function runAuditLoop(input: {
   const steps: TranscriptStep[] = [];
   let consecutiveParseErrors = 0;
 
-  const finalizeThreshold = Math.max(4, Math.floor(maxSteps * 0.35));
+  const finalizeThreshold = unboundedSteps ? 0 : Math.max(4, Math.floor(maxSteps * 0.35));
 
   // Framework guarantee: a run must not end empty. If the model never wrote
   // findings.json (it tends to keep investigating "one more lead" until cut off),
@@ -110,7 +111,9 @@ export async function runAuditLoop(input: {
     // is cut off and records nothing. Tell it the budget every turn, and near the
     // end force it to write findings.json (findings + best hypotheses) so a deep
     // investigation always produces something.
-    const budgetLine = `You are on step ${n} of ${maxSteps} (${remaining} action${remaining === 1 ? "" : "s"} left).`;
+    const budgetLine = unboundedSteps
+      ? `You are on step ${n}. There is no fixed action cap; continue until the phase is genuinely complete, then emit done.`
+      : `You are on step ${n} of ${maxSteps} (${remaining} action${remaining === 1 ? "" : "s"} left).`;
     // Deep mode keeps checking obligations to the end — it must NOT be told to
     // stop investigating; it is told to keep findings.json current. Breadth mode
     // is told to stop opening new leads and write out its hypotheses.

@@ -1,6 +1,12 @@
 import type { AgentTool } from "./tools.js";
 import { renderToolCatalogue } from "./tools.js";
 
+function actionBudgetText(maxSteps: number): string {
+  return Number.isFinite(maxSteps)
+    ? `Up to ${maxSteps} actions`
+    : "No fixed action cap; continue until the phase is genuinely complete";
+}
+
 // The thinnest possible instruction layer. It states the mission, the white-hat
 // boundary, the tool protocol, and the one hard rule the framework enforces
 // (execution-confirmed findings). It deliberately does NOT supply a bug-class
@@ -44,14 +50,15 @@ bugs live in the canonical implementation itself. Never clear a component becaus
 constraint/check that enforces it, or (b) an executable counterexample test. Reason from the security property
 itself, not from what the materials say the code does.
 
-Record as you go. If you form a credible suspicion you cannot fully confirm, write it to findings.json as a
-hypothesis (with location and why) rather than holding it in your head — an investigation that ends without a
-recorded finding or hypothesis is wasted.
+Record actionable leads as you go. findings.json is not an audit notebook: write only credible unmet
+obligations, suspected bugs, and confirmed bugs. Do NOT write "safe", "no issue", "discharged",
+obligation-ledger, or informational entries to findings.json. If you checked a surface and found no actionable
+bug, keep that reasoning in the transcript and leave findings.json empty ([]) for that pass.
 
 How you act:
 - Each tool turn, respond with exactly ONE JSON object and nothing else:
   {"thought": "<your reasoning>", "tool": "<tool name>", "args": { ... }}
-- When finished, write any findings to findings.json, then respond:
+- When finished, write findings.json with only actionable suspected or confirmed findings (or [] if none), then respond:
   {"thought": "<why you are done>", "done": true, "summary": "<brief summary>"}
 - No prose outside the JSON. No markdown fences. One action per turn. You will receive the tool's observation, then act again.
 - Work in whatever order you judge best: explore with bash, read deeply, write/edit local harnesses, form a hypothesis, then test it.
@@ -67,6 +74,8 @@ The one rule the framework enforces:
 ${POC_TRUST_RULE}
 - findings.json must be an array of objects:
   [{"title","severity","location","description","evidence","exploit_sketch","fix","confidence","command_id"?,"fix_patch"?,"patched_success_patterns"?}]
+- Do not include severity "info" entries unless they are explicit REFUTED verdicts in verify mode. No-issue notes,
+  discharged obligations, and audit ledgers are not findings.
 - For the strongest status (confirmed-differential), add "fix_patch": {"path","old","new"} (a minimal edit to the target source) and
   "patched_success_patterns" (what your test prints once the exploit is blocked). The framework applies the fix to the pristine source and
   re-runs your test: a real bug reproduces before the fix and is blocked after it. You cannot apply the fix yourself.
@@ -88,7 +97,7 @@ This is NOT a breadth survey. You are auditing a small, high-criticality slice t
 
 Method — obligation-driven audit (general method, not a hint about this target):
 
-1. SELECT the critical surface. If a focus region is named in the kickoff, audit that. Otherwise build a model of the system and RANK regions by how much soundness rests on them: a region is critical when a top-level security statement — a balance/supply/authorization/uniqueness/integrity property the whole system depends on — is ENFORCED there. Pick the highest-criticality region and commit your remaining budget to it. Record your ranked shortlist (region + the top-level property it enforces + why) to findings.json early so the work is not lost.
+1. SELECT the critical surface. If a focus region is named in the kickoff, audit that. Otherwise build a model of the system and RANK regions by how much soundness rests on them: a region is critical when a top-level security statement — a balance/supply/authorization/uniqueness/integrity property the whole system depends on — is ENFORCED there. Pick the highest-criticality region and commit your remaining budget to it. Keep your ranked shortlist in the transcript; do not put shortlist or safe-surface notes in findings.json.
 
 2. ENUMERATE obligations from DESIGN INTENT, not from the code's own appearance. Read the design material in scope (specs, books, design notes under corpus/) and the higher-level code that USES this region, to determine what it is SUPPOSED to guarantee. Write the obligations down explicitly — each a precise statement of the form "value/relationship X must equal/hold Y for property P". The code cannot tell you what it should enforce; the intent does. A region can look internally consistent and still fail an obligation it was never written to meet.
 
@@ -98,12 +107,12 @@ Method — obligation-driven audit (general method, not a hint about this target
    - If no line enforces the obligation, that ABSENCE is the finding. Missing-constraint bugs do not look wrong on any single line — they look like ordinary assignment, witnessing, or decoding — so you must reason from the obligation, never from whether the code "looks standard".
    - "Looks standard", "matches upstream", "the spec says it does X", or "this is the audited/canonical implementation" are NEVER discharge. The reference can carry the same bug; some bugs live in the canonical code itself. Discharge an obligation only by naming the enforcing line, or refute it with an executable counterexample.
 
-4. Do NOT wrap up while obligations remain unchecked. Go obligation by obligation to the end of your budget. Record every obligation and its status (discharged-with-line / UNMET / uncertain) to findings.json; an UNMET obligation is a finding (or at minimum a hypothesis with location and the exact missing enforcement edge).
+4. Do NOT wrap up while obligations remain unchecked. Go obligation by obligation to the end of your budget. Only UNMET or uncertain obligations with a concrete missing edge belong in findings.json as suspected findings/hypotheses. Discharged-with-line obligations are useful reasoning, but they are not findings and must not be written to findings.json.
 
 How you act:
 - Each tool turn, respond with exactly ONE JSON object and nothing else:
   {"thought": "<your reasoning>", "tool": "<tool name>", "args": { ... }}
-- When finished, write findings.json, then respond: {"thought": "<why you are done>", "done": true, "summary": "<brief summary>"}
+- When finished, write findings.json containing only actionable suspected or confirmed findings (or [] if none), then respond: {"thought": "<why you are done>", "done": true, "summary": "<brief summary>"}
 - No prose outside the JSON. No markdown fences. One action per turn. You will receive the tool's observation, then act again.
 - You CANNOT modify the target source under audit; write tests as new files. To show a fix, put it in the finding's "fix" field (and "fix_patch" for differential confirmation) — the framework applies it. Prove the bug on the unmodified code.
 
@@ -113,6 +122,7 @@ The one rule the framework enforces:
 ${POC_TRUST_RULE}
 - findings.json must be an array of objects:
   [{"title","severity","location","description","evidence","exploit_sketch","fix","confidence","command_id"?,"fix_patch"?,"patched_success_patterns"?}]
+- Do not include severity "info", discharged, no-issue, or obligation-ledger entries in findings.json.
 - For confirmed-differential, add "fix_patch": {"path","old","new"} and "patched_success_patterns". The framework applies the fix to pristine source and re-runs your test.
 
 White-hat boundaries (non-negotiable):
@@ -126,6 +136,14 @@ White-hat boundaries (non-negotiable):
 // language/target (the framework encodes no domain analysis): they convert "what's
 // important?" from a lossy gut-rank into an exhaustive enumeration, so a subtle but
 // critical region cannot be silently ranked out.
+export const MAP_GRANULARITY_RULES = `Granularity is part of correctness:
+- A scope must be one concrete audit unit: one gate, verifier/public-input boundary, authorization rule, value/accounting transition, message edge, proof/circuit obligation, state invariant, parser/serializer boundary, or production entrypoint with its exact trust boundary.
+- Do not use one broad subsystem scope when it contains multiple independent gates, invariants, proof boundaries, or attacker-controlled inputs. Split broad areas by obligation and enforcing region.
+- The map phase is the foundation of the audit. The dig batch cap (for example, 30 scopes per run) is NOT a map target and NOT a stopping condition; it only controls how many already-mapped scopes a later dig batch audits.
+- For a large first-party repository or multi-package protocol, a complete inventory is usually dozens to low hundreds of scopes. Fewer than 30 scopes is acceptable only when the loaded source truly has fewer than 30 distinct security obligations.
+- Checkpoint discipline is mandatory: after an initial directory/entrypoint scan, and no later than 10 inspect commands, write the first broad scopes.json. It may be rough, but it must contain every concrete scope identified so far. Then keep rewriting the full array as you refine and add scopes.
+- Before done, make an explicit expansion pass: scan the loaded first-party tree for omitted packages/modules/entrypoints, split every broad scope, and update scopes.json with the full concrete inventory.`;
+
 export const MAP_SYSTEM = `You are an autonomous white-hat security auditor doing the MAP phase of an audit: enumerate the complete set of audit SCOPES for this target. You are NOT finding or proving bugs yet — a later phase deep-audits each scope. Your job is COVERAGE, not a ranked shortlist that drops things.
 
 Produce the scope inventory by applying THREE lenses (general method, not a hint about this target). Be exhaustive; it is better to over-list than to silently omit:
@@ -143,9 +161,11 @@ For each scope assign:
 - difficulty: how hard to be SURE it is correct (high|medium|low) — a missing constraint you must notice is absent = high.
 - score: 0-10, roughly exposure-weighted, used only to order the dig phase. Low score does NOT drop a scope; it just defers it.
 
+${MAP_GRANULARITY_RULES}
+
 You may use read/bash to explore, but spend little per scope — this phase is broad and shallow. On a large codebase do NOT read every file before writing: get the structure with bash (ls/grep for functions, external/public entrypoints, state writes, value transfers) and enumerate from that.
 
-Output: write scopes.json at the workspace root EARLY — after a first broad pass — and then UPDATE it (rewrite the full array) as you discover more, so a complete-as-of-now inventory always exists even if you run out of budget. It is a JSON array of objects:
+Output: write scopes.json at the workspace root EARLY — after the initial directory/entrypoint scan, and no later than 10 inspect commands — and then UPDATE it (rewrite the full array) as you discover more, so a complete-as-of-now inventory always exists even if you run out of budget. The first write is a checkpoint, not completion. Do not emit done immediately after the checkpoint and do not stop at 30 scopes; keep mapping until the loaded in-scope material has been covered and the expansion pass is complete. It is a JSON array of objects:
 [{"id","obligation","region":"file:lines","lenses":["spec"|"value-flow"|"unbound-input"...],"exposure","difficulty","score","why"}]
 When the inventory is reasonably complete, emit {"done": true, "summary": "..."}. One JSON tool action per turn; no prose outside the JSON; no markdown fences. You CANNOT modify the target source — only write scopes.json and scratch files.`;
 
@@ -158,7 +178,9 @@ export function buildMapKickoff(input: {
   maxSteps: number;
 }): string {
   return `Target: ${input.target}
-Phase: MAP — enumerate the COMPLETE scope inventory (coverage, not a shortlist). Up to ${input.maxSteps} actions; stay broad and shallow.
+Phase: MAP — enumerate the COMPLETE scope inventory (coverage, not a shortlist). ${actionBudgetText(input.maxSteps)}; stay broad and shallow, but keep expanding until the loaded in-scope material has been covered.
+
+${MAP_GRANULARITY_RULES}
 
 Authorized scope note:
 ${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() : "(none provided — treat all loaded source as in scope)"}
@@ -174,7 +196,7 @@ ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim
 Loaded source files:
 ${input.fileManifest}
 
-Apply the three lenses, then write scopes.json and emit done. Respond with one JSON tool action or done object.`;
+Apply the three lenses. After the initial directory/entrypoint scan, and no later than 10 inspect commands, write scopes.json as a checkpoint. Then keep expanding and splitting it, and emit done only after a final completeness pass. Respond with one JSON tool action or done object.`;
 }
 
 export function buildDeepKickoff(input: {
@@ -188,7 +210,7 @@ export function buildDeepKickoff(input: {
 }): string {
   const focus = input.deepFocus && input.deepFocus.trim().length > 0 ? input.deepFocus.trim() : "";
   return `Target: ${input.target}
-Mode: DEEP NARROW-SCOPE AUDIT — spend your whole budget going deep on one critical slice, not wide. Up to ${input.maxSteps} actions.
+Mode: DEEP NARROW-SCOPE AUDIT — go deep on one critical slice, not wide. ${actionBudgetText(input.maxSteps)}.
 
 ${focus
     ? `Focus region (pinned): ${focus}\nAudit this region to the obligation-by-obligation standard below.`
@@ -234,7 +256,7 @@ export function buildVerifyKickoff(input: {
   verify: string;
 }): string {
   return `Target: ${input.target}
-Mode: VERIFY — confirm-or-refute ONE specific suspected finding by execution. Up to ${input.maxSteps} actions.
+Mode: VERIFY — confirm-or-refute ONE specific suspected finding by execution. ${actionBudgetText(input.maxSteps)}.
 
 The suspected finding to verify:
 ${input.verify}
@@ -277,7 +299,7 @@ export function buildSynthesisKickoff(input: {
   synthesize: string;
 }): string {
   return `Target: ${input.target}
-Mode: SYNTHESIS — compose per-scope results into cross-component attack chains. Up to ${input.maxSteps} actions.
+Mode: SYNTHESIS — compose per-scope results into cross-component attack chains. ${actionBudgetText(input.maxSteps)}.
 
 Prior per-scope audit (the material to compose — do NOT just re-list it; find what its pieces ENABLE together):
 ${input.synthesize}
@@ -309,8 +331,8 @@ export const AUDIT_PREPARE_SYSTEM = `You are the PREPARE phase of a security-aud
 
 Goals:
 1. RESOLVE the clue to the concrete subject — the exact code that actually runs. A clue may be a transaction, a deployed-instance identifier, a project or package name, a repository, a link, or a path; resolve it to the real code behind it.
-2. RESOLVE THE DEPENDENCY CLOSURE: follow every component the target's security genuinely relies on — an implementation behind an indirection/upgrade layer, a proof verifier or circuit, an oracle or external feed, a library, a registry, a service it trusts — and bring each into scope too. Stop at the boundary of what the security property depends on.
-3. FETCH the source for every node in the closure, preferring source that is provably the deployed/published one, and stage it into your workspace under a clear layout.
+2. RESOLVE THE SECURITY-CRITICAL CLOSURE: follow every component the target's security genuinely relies on — an implementation behind an indirection/upgrade layer, a proof verifier or circuit, an oracle or external feed, a first-party library, a registry, a service it trusts — and bring each into scope too. Stop at the boundary of what the security property depends on.
+3. FETCH the source for every target/security-critical node in that closure, preferring source that is provably the deployed/published one, and stage it into your workspace under a clear layout. Do NOT spend the run chasing every ordinary package-manager dependency if the manifest/lockfile can resolve it later; pin it in provenance and move on unless it is a security boundary, generated artifact, verifier/circuit, deployment config, or otherwise necessary for the audit to understand the target.
 4. DEPLOYMENT-MATCH (the headline constraint, on by default). IF the target has a live deployed/published instance: prove the staged source is the SAME code actually running there, using whatever verification or equivalence check the platform offers. Record the result per component; if a deployment exists and you cannot establish the match, mark that component "unverified" — never silently present unmatched source as the target. IF there is NO live instance (pre-launch code, a repository or package not yet deployed): deployment-match is "n/a" — this is NOT a failure; instead pin the exact source origin (repository + revision, or package + version, or path + content digest) as the provenance.
 5. RESOLVE the RELIED-ON-BUT-OUT-OF-CODE components — material the security depends on that is not itself the staged code (verification material / circuits, specs, design docs, prior public audits). Best-effort: locate and stage what you can. Whatever you cannot resolve, record as an explicit GAP — the audit treats each gap as a known trust boundary.
 6. CLASSIFY SCOPE per component, so the later audit concentrates its budget on the actual target instead of spreading it across vendored code. Mark a component in_scope=true when it is the deployment-matched target code, OR named in the PROJECT'S OWN scope declaration (its contest/audit scope, its README "in scope" list, its bug-bounty asset list, or the exact set of audited addresses), OR first-party code under audit. Mark in_scope=false for third-party dependencies and libraries, and for relied-on material not deployed as part of THIS target (a separate trust boundary the audit probes only at the target's point of use). This is a FACTUAL classification derived from the deployment and the project's own declaration — never your guess about where a bug might be (that would bias the blind audit). Record under scope_declaration WHERE the in-scope set came from (the deployed addresses and/or the project's scope doc). Still STAGE the out-of-scope dependencies — the target's USE of them can be the bug, and they may be needed to build — only the label differs.
@@ -323,8 +345,9 @@ Hard rules (non-negotiable):
 - Access is READ-ONLY: read / fetch / clone / fork / search freely; NEVER perform a state-changing or value-moving action on any live system.
 - Pin provenance for every staged component: what it is, where it came from, its revision/version/digest, and whether/how it was deployment-matched.
 - Honest gaps: anything unresolved is recorded, never hidden or fabricated.
+- Do NOT audit yet: do not form vulnerability hypotheses, analyze exploitability, rank suspicious code behavior, build attack paths, write PoCs, or produce security conclusions in prepare. If a security-relevant fact matters, record only the neutral source/provenance/scope fact and leave all bug discovery to map/dig.
 
-Finish by writing prepare_manifest.json at the workspace root (schema in the finalize step). The staged workspace plus that manifest are the audit's source.`;
+Write prepare_manifest.json EARLY after the first usable source/provenance set is staged, then rewrite it as you resolve more. Stop when the workspace contains the authorized target code, official answer-free docs/specs, and honest provenance/gap records needed for the sealed audit; do not keep fetching low-value dependencies after the audit can proceed. Finish with prepare_manifest.json at the workspace root (schema in the finalize step). The staged workspace plus that manifest are the audit's source.`;
 
 export const AUDIT_CONFIRM_SYSTEM = `You are an autonomous white-hat security auditor in CONFIRM mode. You are handed the CONFIRMED FINDINGS of a prior, network-sealed audit — frozen and fingerprinted BEFORE this phase, so their provenance (found blind, no network) is fixed. Your job is NOT to discover new bugs and NOT to amend these findings. It is to take them to a higher, real-world standard of certainty and produce a submit/no-submit decision sheet — BY EXECUTION, not by argument.
 
@@ -373,7 +396,7 @@ export function buildConfirmKickoff(input: {
   confirm: string;
 }): string {
   return `Target: ${input.target}
-Mode: CONFIRM — take the prior audit's confirmed findings to a real-world standard by EXECUTION, then write the decision sheet. Up to ${input.maxSteps} actions. The network is available; reproduce on real ground truth, never broadcast.
+Mode: CONFIRM — take the prior audit's confirmed findings to a real-world standard by EXECUTION, then write the decision sheet. ${actionBudgetText(input.maxSteps)}. The network is available; reproduce on real ground truth, never broadcast.
 
 The prior audit's confirmed findings (frozen; reproduce/consolidate these — do NOT discover new ones):
 ${input.confirm}
@@ -404,7 +427,7 @@ export function buildAuditKickoff(input: {
   maxSteps: number;
 }): string {
   return `Target: ${input.target}
-Step budget: up to ${input.maxSteps} actions. Spend them where expected value is highest. Return {"done": true} early if further effort is low-value.
+Step budget: ${actionBudgetText(input.maxSteps)}. Spend effort where expected value is highest. Return {"done": true} only when further effort is low-value.
 
 Authorized scope note:
 ${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() : "(none provided — treat all loaded source as in scope)"}

@@ -444,7 +444,7 @@ export class MetadataStore {
     this.db
       .prepare(
         `UPDATE run SET status = ?, ended_at = ?, scopes_total = ?, scopes_audited = ?, scopes_pending = ?, findings_total = ?
-         WHERE id = ?`,
+         WHERE id = ? AND status = 'running'`,
       )
       .run(
         status,
@@ -478,6 +478,13 @@ export class MetadataStore {
     return Number(info.changes);
   }
 
+  reconcileTerminalRun(id: number, status: RunStatus): number {
+    const info = this.db
+      .prepare("UPDATE run SET status = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ? AND status != 'running'")
+      .run(status, now(), id);
+    return Number(info.changes);
+  }
+
   /** Live coverage update mid-run (so a UI shows mapped/audited progress as digs land). */
   updateRunCoverage(runId: number, coverage: Coverage): void {
     this.db
@@ -493,6 +500,10 @@ export class MetadataStore {
     this.db
       .prepare("UPDATE run SET run_scopes_done = ?, run_scopes_target = ?, dig_started_at = COALESCE(dig_started_at, ?) WHERE id = ?")
       .run(done, target, now(), runId);
+  }
+
+  updateRunScopesTarget(runId: number, target: number): void {
+    this.db.prepare("UPDATE run SET run_scopes_target = ? WHERE id = ?").run(target, runId);
   }
 
   /** Record one post-dig STAGE's outcome on the run (synthesis / differential / refutation /
@@ -818,6 +829,29 @@ export class MetadataStore {
     return { id: Number(info.lastInsertRowid), token };
   }
 
+  /** Reuse the local auto-daemon identity across `flounder ui` restarts.
+   * Prefer a local daemon already selected by a project so queued/pinned work remains claimable. */
+  getOrCreateLocalDaemonToken(): { id: number; token: string; reused: boolean } {
+    const row = this.db
+      .prepare(
+        `SELECT id, token FROM daemon
+         WHERE name = 'local' OR name LIKE 'local-%'
+         ORDER BY
+           CASE WHEN id IN (SELECT daemon_id FROM project WHERE daemon_id IS NOT NULL) THEN 0 ELSE 1 END,
+           COALESCE(last_seen_at, created_at) DESC,
+           id DESC
+         LIMIT 1`,
+      )
+      .get() as { id: number; token: string } | undefined;
+    if (row) return { id: Number(row.id), token: String(row.token), reused: true };
+    const created = this.createDaemonToken("local");
+    return { ...created, reused: false };
+  }
+
+  getDaemon(id: number): Record<string, unknown> | undefined {
+    return this.db.prepare("SELECT id, name, capabilities, workspace, last_seen_at, created_at FROM daemon WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  }
+
   getDaemonByToken(token: string): Record<string, unknown> | undefined {
     return this.db.prepare("SELECT * FROM daemon WHERE token = ?").get(token) as Record<string, unknown> | undefined;
   }
@@ -829,7 +863,9 @@ export class MetadataStore {
   }
 
   listDaemons(): Array<Record<string, unknown>> {
-    return this.db.prepare("SELECT id, name, capabilities, workspace, last_seen_at, created_at FROM daemon ORDER BY created_at").all() as Array<Record<string, unknown>>;
+    return this.db
+      .prepare("SELECT id, name, capabilities, workspace, last_seen_at, created_at FROM daemon ORDER BY COALESCE(last_seen_at, created_at) DESC, id DESC")
+      .all() as Array<Record<string, unknown>>;
   }
 
   /** Rename a registered daemon (operator-facing; the token is unchanged). */
@@ -877,6 +913,20 @@ export class MetadataStore {
 
   setJobStatus(jobId: number, status: string, error?: string): void {
     this.db.prepare("UPDATE job SET status = ?, error = ?, updated_at = ? WHERE id = ?").run(status, error ?? null, now(), jobId);
+  }
+
+  cancelRunJob(jobId: number, error = "canceled by operator"): boolean {
+    const info = this.db
+      .prepare("UPDATE job SET status = 'canceled', cancel = 1, error = ?, updated_at = ? WHERE id = ? AND status IN ('queued','dispatched','running')")
+      .run(error, now(), jobId);
+    return Number(info.changes) > 0;
+  }
+
+  cancelJob(jobId: number, error = "canceled by operator"): boolean {
+    const info = this.db
+      .prepare("UPDATE job SET status = 'canceled', cancel = 1, error = ?, updated_at = ? WHERE id = ? AND status IN ('queued','dispatched','running')")
+      .run(error, now(), jobId);
+    return Number(info.changes) > 0;
   }
 
   requestJobCancel(jobId: number): void {

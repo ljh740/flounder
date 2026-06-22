@@ -264,7 +264,7 @@ const writeTool: AgentTool = {
     if (Buffer.byteLength(content, "utf8") > ctx.cfg.reproductionMaxFileBytes) return { observation: "error: content exceeds the configured file-size limit." };
 
     if (baselineProtected(ctx, normalized)) return { observation: baselineBlockMessage(normalized) };
-    if (!isReportFile(normalized)) {
+    if (!ctx.cfg.prepareMode && !isReportFile(normalized)) {
       const blockedFile = firstBlockedSandboxFile([{ path: normalized, content }]);
       if (blockedFile) return { observation: `blocked: ${blockedFile}` };
     }
@@ -298,7 +298,7 @@ const editTool: AgentTool = {
 
     const next = asBool(args.replace_all, false) ? existing.content.split(oldText).join(newText) : existing.content.replace(oldText, newText);
     if (Buffer.byteLength(next, "utf8") > ctx.cfg.reproductionMaxFileBytes) return { observation: "error: edited file exceeds the configured file-size limit." };
-    if (!isReportFile(existing.path)) {
+    if (!ctx.cfg.prepareMode && !isReportFile(existing.path)) {
       const blockedFile = firstBlockedSandboxFile([{ path: existing.path, content: next }]);
       if (blockedFile) return { observation: `blocked: ${blockedFile}` };
     }

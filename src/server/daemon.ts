@@ -6,14 +6,14 @@
 
 import path from "node:path";
 import os from "node:os";
-import { writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
 import { runPrepare } from "../agent/acquire.js";
 import { MockAuditLlmClient } from "../llm/mock.js";
 import { specToConfig, type LaunchSpec } from "./run-manager.js";
 import { toScopeRow, toFindingRow, configSnapshot, type RunTracker, type ConfirmDecisionInput } from "../db/record.js";
-import type { AuditorConfig } from "../config.js";
+import { defaultOutputDir, defaultWorkspaceDir, type AuditorConfig } from "../config.js";
 import type { Coverage, RunStatus } from "../db/store.js";
 import type { AgentFinding, AuditScope } from "../agent/tools.js";
 import { assertProviderAuthenticated, knownRuntimeProviders, providerAuthStatus } from "../provider-auth.js";
@@ -24,7 +24,7 @@ export interface DaemonOptions {
   out?: string;
   name?: string;
   concurrency?: number;
-  workspace?: string; // root under which project dirs live; materials resolve here (default ./workspace)
+  workspace?: string; // root under which project dirs live; materials resolve here (default ~/.flounder/workspace)
 }
 
 type Activity = { kind: string; delta?: string; tool?: string; step?: number };
@@ -32,10 +32,12 @@ type Activity = { kind: string; delta?: string; tool?: string; step?: number };
 export async function runDaemon(opts: DaemonOptions): Promise<void> {
   const base = opts.server.replace(/\/$/, "");
   const headers = { authorization: `Bearer ${opts.token}`, "content-type": "application/json" };
-  const out = opts.out ?? "runs";
-  const workspace = path.resolve(opts.workspace ?? "workspace"); // where project dirs (and their relative materials) live
+  const out = opts.out ?? defaultOutputDir();
+  const workspace = path.resolve(opts.workspace ?? defaultWorkspaceDir()); // where project dirs (and their relative materials) live
+  await ensureDaemonDirectories(out, workspace);
   const maxConcurrent = Math.max(1, opts.concurrency ?? 2);
   const inflight = new Map<number, AbortController>(); // jobId -> abort
+  const runScopeTargets = new Map<number, number>(); // jobId -> live dig-batch target
 
   const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", capabilities: await daemonCapabilities(), workspace }) }).catch(() => null);
   if (!reg || !reg.ok) throw new Error(`daemon: could not register with ${base} (status ${reg ? reg.status : "no response"}) — check --server and --token`);
@@ -84,13 +86,26 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}),
         });
       } else {
+        let verifyTempDir: string | undefined;
         if (spec.verb === "audit" && spec.verifyFindings !== undefined) {
           // verify posture: write the inline findings to a temp file the kernel's verify path reads.
-          const vf = path.join(os.tmpdir(), `flounder-verify-${job.id}.json`);
+          verifyTempDir = await mkdtemp(path.join(os.tmpdir(), `flounder-verify-${job.id}-`));
+          const vf = path.join(verifyTempDir, "findings.json");
           await writeFile(vf, JSON.stringify(spec.verifyFindings), "utf8");
           cfg.auditVerify = vf;
         }
-        await runAudit(cfg, { kind: spec.verb, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.mockLlm ? { llm: new MockAuditLlmClient() } : {}) });
+        try {
+          await runAudit(cfg, {
+            kind: spec.verb,
+            signal: abort.signal,
+            makeTracker,
+            onActivity: sink.push,
+            control: { getRunScopesTarget: () => runScopeTargets.get(job.id) },
+            ...(spec.mockLlm ? { llm: new MockAuditLlmClient() } : {}),
+          });
+        } finally {
+          if (verifyTempDir) await rm(verifyTempDir, { recursive: true, force: true });
+        }
       }
       sink.flush();
       await post(base, headers, `/api/daemon/jobs/${job.id}/status`, { status: abort.signal.aborted ? "canceled" : "done" });
@@ -99,6 +114,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       await post(base, headers, `/api/daemon/jobs/${job.id}/status`, { status: abort.signal.aborted ? "canceled" : "error", error: error instanceof Error ? error.message.slice(0, 500) : String(error) });
     } finally {
       inflight.delete(job.id);
+      runScopeTargets.delete(job.id);
       void claimLoop();
     }
   };
@@ -123,9 +139,12 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           const line = frame.split("\n").find((l) => l.startsWith("data:"));
           if (!line) continue;
           try {
-            const ev = JSON.parse(line.slice(5).trim()) as { type: string; jobId?: number };
+            const ev = JSON.parse(line.slice(5).trim()) as { type: string; jobId?: number; target?: number };
             if (ev.type === "poll") void claimLoop();
             else if (ev.type === "cancel" && ev.jobId !== undefined) inflight.get(ev.jobId)?.abort();
+            else if (ev.type === "set-run-scopes-target" && ev.jobId !== undefined && typeof ev.target === "number" && Number.isFinite(ev.target)) {
+              runScopeTargets.set(ev.jobId, Math.max(1, Math.floor(ev.target)));
+            }
           } catch {
             // ignore malformed frame
           }
@@ -136,6 +155,11 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
+}
+
+export async function ensureDaemonDirectories(out: string, workspace: string): Promise<void> {
+  await mkdir(path.resolve(out), { recursive: true });
+  await mkdir(path.resolve(workspace), { recursive: true });
 }
 
 async function daemonCapabilities(): Promise<Record<string, unknown>> {
@@ -196,8 +220,9 @@ class RemoteTracker implements RunTracker {
   }
 
   findings(findings: AgentFinding[], runDir: string, reason?: string): void {
-    if (findings.length === 0) return;
-    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { findings: findings.map((f) => toFindingRow(f, runDir)), reason }) : Promise.resolve()));
+    const reportable = findings.filter((finding) => finding.severity !== "info" && finding.confirmationStatus !== "discharged");
+    if (reportable.length === 0) return;
+    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { findings: reportable.map((f) => toFindingRow(f, runDir)), reason }) : Promise.resolve()));
   }
 
   stage(name: string, info: Record<string, unknown>): void {

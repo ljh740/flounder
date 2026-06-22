@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { defaultConfig, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
+import { defaultConfig, defaultOutputDir, defaultWorkspaceDir, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
 import { CLI_CONFIG_KEYS, configFilePath, getCliConfigValue, isCliConfigKey, loadCliConfig, setCliConfigValue, unsetCliConfigValue, type CliConfigKey } from "./config-file.js";
 import { launchViaApi, ran, resolveServer, fetchArtifact } from "./cli-client.js";
 import { deriveScopeNote } from "./scope-note.js";
@@ -37,17 +37,21 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (cmd === "ui") {
+    if (rest[0] === "help" || rest.includes("--help") || rest.includes("-h")) {
+      printUiHelp();
+      return;
+    }
     // Control-plane web app: track/drive audits across projects. Keeps running (the server
     // holds the event loop open) until interrupted. Runs execute on a DAEMON, not here — so
-    // by default we also spawn a co-located local daemon (mint a token + `flounder daemon`). Pass
+    // by default we also spawn a co-located local daemon (mint a token + `flounder daemon start`). Pass
     // --no-daemon to run the control plane alone and connect your own daemon(s) elsewhere.
     const port = readIntFlag(rest, "--port") ?? 4500;
     const host = readFlag(rest, "--host") ?? "127.0.0.1";
     const out = resolveOut(rest);
-    const workspace = readFlag(rest, "--workspace") ?? "./workspace"; // where the co-located daemon finds project dirs
+    const workspace = readFlag(rest, "--workspace") ?? defaultWorkspaceDir(); // where the co-located daemon finds project dirs
     const server = startUiServer({ out, port, host });
     if (rest.includes("--no-daemon")) {
-      console.log("[flounder ui] --no-daemon: no executor started. Connect one with `flounder daemon --server <url> --token <token>`.");
+      console.log("[flounder ui] --no-daemon: no executor started. Connect one with `flounder daemon start --server <url> --token <token>`.");
     } else {
       const concurrency = readIntFlag(rest, "--concurrency");
       server.on("listening", () => spawnLocalDaemon({ out, url: `http://${host}:${port}`, workspace, ...(concurrency !== undefined ? { concurrency } : {}) }));
@@ -57,20 +61,32 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (cmd === "daemon") {
+    if (rest.length === 0 || rest[0] === "help" || rest[0] === "--help" || rest[0] === "-h") {
+      printDaemonHelp();
+      return;
+    }
     if (rest[0] === "provider" || rest[0] === "providers") {
       await runProviderCommand(rest.slice(1));
       return;
     }
+    if (rest[0] !== "start") {
+      throw new Error(`Unknown daemon command "${rest[0]}". Use: flounder daemon start --server <url> --token <token>, or flounder daemon provider ...`);
+    }
     // Execution plane: connect to a control-plane server, claim queued jobs, and run them
     // LOCALLY (code + provider keys stay here). May run on a different machine than the
     // server. Reports progress back over HTTP; never touches the server's DB directly.
-    const server = readFlag(rest, "--server");
-    const token = readFlag(rest, "--token");
-    if (!server || !token) throw new Error("flounder daemon needs --server <url> and --token <token> (create one with `flounder server daemon-token mint [name]`)");
-    const out = resolveOut(rest);
-    const name = readFlag(rest, "--name");
-    const workspace = readFlag(rest, "--workspace");
-    const concurrency = readIntFlag(rest, "--concurrency");
+    const startArgs = rest.slice(1);
+    if (startArgs.length === 0 || startArgs[0] === "help" || startArgs.includes("--help") || startArgs.includes("-h")) {
+      printDaemonStartHelp();
+      return;
+    }
+    const server = readFlag(startArgs, "--server");
+    const token = readFlag(startArgs, "--token");
+    if (!server || !token) throw new Error("flounder daemon start needs --server <url> and --token <token> (create one with `flounder server daemon-token mint [name]`)");
+    const out = resolveOut(startArgs);
+    const name = readFlag(startArgs, "--name");
+    const workspace = readFlag(startArgs, "--workspace");
+    const concurrency = readIntFlag(startArgs, "--concurrency");
     await runDaemon({ server, token, out, ...(name ? { name } : {}), ...(workspace ? { workspace } : {}), ...(concurrency !== undefined ? { concurrency } : {}) });
     return; // runDaemon loops forever (until interrupted)
   }
@@ -287,16 +303,18 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof raw.dryRun === "boolean") cfg.dryRun = raw.dryRun;
 }
 
-// Spawn a co-located daemon for `flounder ui`: mint a fresh bearer token in the shared store,
-// then run `flounder daemon` as a child pointed at the just-started server. The child dies with
-// the parent. (A remote daemon is started the same way, by hand, on another machine.)
+// Spawn a co-located daemon for `flounder ui`: reuse the local auto-daemon token from
+// the shared store, then run `flounder daemon start` as a child pointed at the
+// just-started server. Reusing the token keeps the daemon id stable across UI restarts,
+// so projects pinned to the local executor keep claiming their queued jobs.
 function spawnLocalDaemon(opts: { out: string; url: string; workspace?: string; concurrency?: number }): void {
   const store = MetadataStore.openForOutput(opts.out);
-  const { token } = store.createDaemonToken(`local-${process.pid}`);
+  const { id, token, reused } = store.getOrCreateLocalDaemonToken();
   store.close();
-  const args = [fileURLToPath(import.meta.url), "daemon", "--server", opts.url, "--token", token, "--out", opts.out];
+  const args = [fileURLToPath(import.meta.url), "daemon", "start", "--server", opts.url, "--token", token, "--out", opts.out, "--name", "local"];
   if (opts.workspace) args.push("--workspace", opts.workspace);
   if (opts.concurrency !== undefined) args.push("--concurrency", String(opts.concurrency));
+  console.log(`[flounder ui] ${reused ? "reusing" : "created"} local daemon #${id}`);
   const child = spawn(process.execPath, args, { stdio: "inherit" });
   child.on("error", (error) => console.error(`[flounder ui] could not start local daemon: ${error.message}`));
   child.on("exit", (code) => console.log(`[flounder ui] local daemon exited (code ${code ?? "?"})`));
@@ -319,14 +337,18 @@ function spawnLocalDaemon(opts: { out: string; url: string; workspace?: string; 
   }
 }
 
-/** Resolve --out: flag > persisted config `out` > "runs". Keeps the tracking-store location
+/** Resolve --out: flag > persisted config `out` > ~/.flounder. Keeps the tracking-store location
  * consistent across the CLI, the control plane, and the daemon when set once via config. */
 function resolveOut(args: string[]): string {
-  return readFlag(args, "--out") ?? loadCliConfig().values.out ?? "runs";
+  return readFlag(args, "--out") ?? loadCliConfig().values.out ?? defaultOutputDir();
 }
 
 async function runProviderCommand(args: string[]): Promise<void> {
   const subcommand = args[0] ?? "list";
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    printDaemonProviderHelp();
+    return;
+  }
   const positional = (i = 0): string | undefined => args.filter((token) => !token.startsWith("--")).slice(1)[i];
   const provider = positional() ?? readFlag(args, "--provider") ?? loadCliConfig().values.provider ?? defaultConfig().provider;
 
@@ -353,6 +375,65 @@ async function runProviderCommand(args: string[]): Promise<void> {
   throw new Error(`Unknown daemon provider command "${subcommand}". Use: flounder daemon provider list | check [provider] | login [provider]`);
 }
 
+function printDaemonHelp(): void {
+  console.log(`flounder daemon — execution-plane worker.
+
+Usage:
+  flounder daemon start --server <url> --token <token> [--workspace <dir>] [--out <dir>] [--name <name>] [--concurrency <n>]
+  flounder daemon provider [list | check [provider] | login [provider]]
+
+The daemon runs audits locally: target source, sandbox execution, and provider
+credentials stay on this machine. The control-plane server only queues jobs and
+stores status.
+
+Defaults:
+  --out        ~/.flounder
+  --workspace  ~/.flounder/workspace
+
+Setup:
+  flounder server daemon-token mint my-daemon
+  flounder daemon provider login openai-codex
+  flounder daemon provider check openai-codex
+  flounder daemon start --server http://127.0.0.1:4500 --token <token>
+`);
+}
+
+function printDaemonStartHelp(): void {
+  console.log(`flounder daemon start — connect this machine as an executor.
+
+Usage:
+  flounder daemon start --server <url> --token <token> [--workspace <dir>] [--out <dir>] [--name <name>] [--concurrency <n>]
+
+Required:
+  --server      Control-plane URL, for example http://127.0.0.1:4500
+  --token       Daemon connection token minted by flounder server daemon-token mint
+
+Defaults:
+  --out         ~/.flounder
+  --workspace  ~/.flounder/workspace
+
+Before starting real work, authenticate provider profiles on this daemon machine:
+  flounder daemon provider login openai-codex
+  flounder daemon provider check openai-codex
+`);
+}
+
+function printDaemonProviderHelp(): void {
+  console.log(`flounder daemon provider — provider auth on this daemon machine.
+
+Usage:
+  flounder daemon provider list
+  flounder daemon provider check [provider]
+  flounder daemon provider login [provider]
+
+Provider credentials are never stored on the server. OAuth/subscription providers
+write daemon-local auth under ~/.flounder/agent/auth.json unless
+FLOUNDER_AGENT_DIR is set. Existing pi auth for the same provider can be imported
+from ~/.pi/agent/auth.json. API-key providers can be supplied through the daemon
+process environment.
+`);
+}
+
 function runMintTokenCommand(args: string[]): void {
   const out = resolveOut(args);
   const positional = args.find((token) => !token.startsWith("--"));
@@ -363,7 +444,7 @@ function runMintTokenCommand(args: string[]): void {
     const { id, token } = db.createDaemonToken(name);
     console.log(`[daemon ${id}] ${name}`);
     console.log(`token: ${token}`);
-    console.log(`run on the executor machine:\n  flounder daemon --server ${server} --token ${token}`);
+    console.log(`run on the executor machine:\n  flounder daemon start --server ${server} --token ${token}`);
   } finally {
     db.close();
   }
@@ -384,7 +465,7 @@ function runDaemonListCommand(args: string[]): void {
   try {
     const daemons = db.listDaemons();
     if (daemons.length === 0) {
-      console.log("(no daemons registered — create a connection token with `flounder server daemon-token mint [name]`, then run `flounder daemon --server <url> --token <token>`)");
+      console.log("(no daemons registered — create a connection token with `flounder server daemon-token mint [name]`, then run `flounder daemon start --server <url> --token <token>`)");
       return;
     }
     for (const d of daemons) console.log(`• [${d.id}] ${d.name}  last_seen=${d.last_seen_at ?? "never"}`);
@@ -797,8 +878,8 @@ Usage:
   flounder server daemon-token mint [name] [--server <url>]                      create a daemon connection token
   flounder config  [list | get <key> | set <key> <value> | unset <key> | path] [--global|--local]   persisted CLI defaults (server, provider, model, thinking, out, posture)
   flounder daemon provider [list | check [provider] | login [provider]]          manage provider auth on this daemon machine
-  flounder ui      [--port <n>] [--host <h>] [--out <dir>] [--no-daemon]           control-plane web dashboard + a co-located executor daemon (localhost)
-  flounder daemon  --server <url> --token <token> [--out <dir>] [--concurrency <n>]   execution plane: claim + run queued jobs (may be a different machine)
+  flounder ui      [--port <n>] [--host <h>] [--out <dir>] [--workspace <dir>] [--concurrency <n>] [--no-daemon]   control-plane web dashboard + a co-located executor daemon (localhost)
+  flounder daemon start --server <url> --token <token> [--out <dir>] [--workspace <dir>] [--concurrency <n>]   execution plane: claim + run queued jobs (may be a different machine)
 
 CLI layout:
   Workflow verbs stay top-level. Control-plane resource operations live under
@@ -808,19 +889,19 @@ CLI layout:
     flounder server run list            reads global run history without colliding with "flounder run"
     flounder server finding list        reads the global finding index, optionally filtered by project
     flounder server daemon-token mint   creates a daemon connection token on the control-plane side
-    flounder daemon --token ...    runs the executor on the daemon machine
+    flounder daemon start --server ... --token ...    runs the executor on the daemon machine
     flounder daemon provider ...   logs in/checks provider auth on the daemon machine
 
 Control plane vs execution plane:
   flounder ui starts the CONTROL PLANE (the dashboard, REST API, SQLite store, and job queue) and,
   unless --no-daemon, a co-located DAEMON to execute jobs. The daemon is what actually runs the
-  audit — so code and provider keys stay on the daemon's machine. Run "flounder daemon" on another
+  audit — so code and provider keys stay on the daemon's machine. Run "flounder daemon start" on another
   host (with a token minted by the server operator) to execute remotely; the server owns the DB
   and the daemon only reports progress back over HTTP.
 
   Provider auth is local to each daemon machine. Use "flounder daemon provider login openai-codex" for
   subscription/OAuth providers, or set the provider's API-key environment variables before
-  starting "flounder daemon". Use "flounder daemon provider check <provider>" to verify the daemon host.
+  running "flounder daemon start". Use "flounder daemon provider check <provider>" to verify the daemon host.
 
 How CLI runs execute (the API is the single entry point):
   run / map / audit / confirm / prepare are thin clients of the control plane: the CLI builds a
@@ -851,8 +932,9 @@ Shared options:
   --provider <name>       Flounder provider id (default openai-codex); codex-cli/claude-code are explicit local fallbacks
   --model <name>          set the audit model
   --thinking <level>      off|minimal|low|medium|high|xhigh
-  --out <dir>             artifact output directory (default runs)
+  --out <dir>             artifact output directory and local tracking store (default ~/.flounder)
   --history-dir <dir>     project history directory, default <out>/history
+  --workspace <dir>       daemon project workspace root, default ~/.flounder/workspace
   --scope-note <text>     one-line authorized-scope hint for the agent
   --max-steps <n>         cap agent turns for a breadth pass / pinned audit (default: UNBOUNDED — the model stops when done)
   --no-prepare            skip the toolchain warm-up (deps fetch/build)
@@ -885,6 +967,24 @@ flounder audit selectors (choose one; default digs the existing inventory):
 flounder confirm: unbounded by default (ends when the model finishes); --max-steps caps it. Auto-resumes an
 interrupted prior confirm of the same run dir (carries already-settled rows forward); --fresh ignores it.
 `);
+}
+
+function printUiHelp(): void {
+  console.log(`flounder ui — start the control-plane dashboard.
+
+Usage:
+  flounder ui [--port <n>] [--host <h>] [--out <dir>] [--workspace <dir>] [--concurrency <n>] [--no-daemon]
+
+Options:
+  --port              Dashboard/API port, default 4500
+  --host              Bind host, default 127.0.0.1
+  --out               Flounder product home/output dir, default ~/.flounder
+  --workspace         Co-located daemon workspace, default ~/.flounder/workspace
+  --concurrency       Co-located daemon jobs in parallel, default 2
+  --no-daemon         Start only the control plane; connect executors with flounder daemon start
+
+flounder ui starts the REST API, SQLite tracking store, dashboard, and by default a local
+execution daemon. Target code and provider credentials stay on the daemon machine.`);
 }
 
 main(process.argv.slice(2)).catch((error: unknown) => {

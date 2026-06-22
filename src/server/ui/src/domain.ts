@@ -110,6 +110,10 @@ export function runDur(run: RunRow | undefined, live?: boolean): string {
   return end ? fmtDur(end - start) : "";
 }
 
+export function isVerifyRun(run: RunRow | undefined): boolean {
+  return Boolean(run && parseJson<{ verify?: boolean }>(run.budgets_json, {}).verify === true);
+}
+
 export function pct(a: number | null | undefined, t: number | null | undefined): number {
   return t && t > 0 ? Math.round(((a ?? 0) / t) * 100) : 0;
 }
@@ -131,7 +135,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
       ? " · confirming findings"
       : ` · current run ${audit.run_scopes_done ?? 0}/${audit.run_scopes_target}`
     : "";
-  const isVerify = Boolean(audit && parseJson<{ verify?: boolean }>(audit.budgets_json, {}).verify === true);
+  const isVerify = isVerifyRun(audit);
   const verifyStat = isVerify
     ? `Verifying ${audit?.run_scopes_done ?? 0}/${audit?.run_scopes_target ?? "?"} findings${detail.findingsTotal ? ` · ${detail.findingsTotal} in project` : ""}`
     : "";
@@ -176,6 +180,9 @@ export function runProgress(run: RunRow, decisions: ConfirmDecision[]): string {
   if (run.kind === "confirm") {
     const rows = decisions.filter((d) => d.run_id === run.id);
     return rows.length ? `${rows.filter((d) => d.reproduced === "yes").length}/${rows.length} reproduced` : "No decisions recorded yet";
+  }
+  if (isVerifyRun(run) && run.run_scopes_target != null) {
+    return `${run.run_scopes_done ?? 0}/${run.run_scopes_target} findings verified`;
   }
   if (run.run_scopes_target != null) {
     return `${run.run_scopes_done ?? 0}/${run.run_scopes_target} scopes in this batch${run.scopes_total != null ? ` · ${run.scopes_audited ?? 0}/${run.scopes_total} total audited` : ""}`;

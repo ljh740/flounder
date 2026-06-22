@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { createInterface } from "node:readline";
 import { findEnvKeys, getEnvApiKey, getProviders } from "@earendil-works/pi-ai";
 import { getOAuthProvider, getOAuthProviders, type OAuthPrompt, type OAuthSelectPrompt } from "@earendil-works/pi-ai/oauth";
+import { flounderHomeDir } from "./config.js";
 
 const LOCAL_FALLBACK_PROVIDERS = new Set(["mock", "codex-cli", "claude-code"]);
 
@@ -63,7 +64,12 @@ export function providerAuthPath(): string {
 }
 
 export function flounderAgentDir(): string {
-  return process.env.FLOUNDER_AGENT_DIR || join(homedir(), ".flounder", "agent");
+  return process.env.FLOUNDER_AGENT_DIR || join(flounderHomeDir(), "agent");
+}
+
+function defaultPiAuthPath(): string {
+  const piAgentDir = process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
+  return join(piAgentDir, "auth.json");
 }
 
 export function knownRuntimeProviders(): string[] {
@@ -96,6 +102,9 @@ export async function providerAuthStatus(provider: string): Promise<ProviderAuth
   const stored = await hasStoredAuth(normalized, authPath);
   if (stored) return { ...base, required: true, configured: true, source: "stored", sourceLabel: authPath };
 
+  const importedFrom = await importDefaultPiAuth(normalized, authPath);
+  if (importedFrom) return { ...base, required: true, configured: true, source: "stored", sourceLabel: `${authPath} (imported from ${importedFrom})` };
+
   const envKeys = findEnvKeys(normalized);
   if (envKeys?.length) {
     return { ...base, required: true, configured: true, source: "environment", sourceLabel: envKeys.join(", ") };
@@ -117,6 +126,12 @@ export async function assertProviderAuthenticated(provider: string): Promise<voi
 
 export async function loginProvider(provider: string): Promise<void> {
   const normalized = provider.trim();
+  const importedFrom = await importDefaultPiAuth(normalized, providerAuthPath());
+  if (importedFrom) {
+    console.log(`${normalized} credentials imported from existing pi auth (${importedFrom}) into ${providerAuthPath()}.`);
+    return;
+  }
+
   const oauth = getOAuthProvider(normalized);
   if (!oauth) {
     const expected = EXPECTED_ENV[normalized] ?? [];
@@ -176,6 +191,24 @@ async function hasStoredAuth(provider: string, authPath: string): Promise<boolea
   if (!existsSync(authPath)) return false;
   const auth = await readAuthFile(authPath);
   return Boolean(auth[provider]);
+}
+
+async function importDefaultPiAuth(provider: string, authPath: string): Promise<string | undefined> {
+  if (process.env.FLOUNDER_DISABLE_PI_AUTH_IMPORT === "1") return undefined;
+  const piAuthPath = defaultPiAuthPath();
+  if (piAuthPath === authPath || !existsSync(piAuthPath)) return undefined;
+  const piAuth = await readAuthFile(piAuthPath);
+  const entry = piAuth[provider];
+  if (!entry) return undefined;
+
+  await mkdir(dirname(authPath), { recursive: true });
+  const auth = await readAuthFile(authPath);
+  if (!auth[provider]) {
+    auth[provider] = entry;
+    await writeFile(authPath, JSON.stringify(auth, null, 2), { encoding: "utf8", mode: 0o600 });
+    await chmod(authPath, 0o600).catch(() => undefined);
+  }
+  return piAuthPath;
 }
 
 async function readAuthFile(authPath: string): Promise<Record<string, unknown>> {

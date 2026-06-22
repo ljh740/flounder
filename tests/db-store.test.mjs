@@ -174,6 +174,47 @@ test("store: daemon tokens + job queue (claim is FIFO and one-shot; cancel is ob
   assert.deepEqual(db.canceledJobIds(), [j1]); // a daemon polls this to abort
   db.setJobStatus(j1, "killed");
   assert.deepEqual(db.canceledJobIds(), []); // no longer running → not reported
+  assert.equal(db.cancelJob(pinned), true); // queued/dispatched/running jobs are operator-cancelable
+  assert.equal(db.getJob(pinned).status, "canceled");
+  db.close();
+});
+
+test("store: local auto-daemon token is stable across UI restarts", async () => {
+  const db = await tempDb();
+  const first = db.getOrCreateLocalDaemonToken();
+  assert.equal(first.reused, false);
+  const again = db.getOrCreateLocalDaemonToken();
+  assert.equal(again.reused, true);
+  assert.equal(again.id, first.id);
+  assert.equal(again.token, first.token);
+  db.close();
+});
+
+test("store: local auto-daemon reuse prefers the daemon selected by projects", async () => {
+  const db = await tempDb();
+  const selected = db.createDaemonToken("local-100");
+  const newer = db.createDaemonToken("local-200");
+  db.upsertProject({ name: "pinned", daemonId: selected.id });
+  const picked = db.getOrCreateLocalDaemonToken();
+  assert.equal(picked.id, selected.id);
+  assert.equal(picked.token, selected.token);
+  assert.notEqual(picked.id, newer.id);
+  db.close();
+});
+
+test("store: daemons list newest heartbeat first so UI defaults to an online executor", async () => {
+  const db = await tempDb();
+  const { token: staleToken } = db.createDaemonToken("stale-local");
+  const { token: currentToken } = db.createDaemonToken("current-local");
+  const staleId = Number(db.getDaemonByToken(staleToken).id);
+  const currentId = Number(db.getDaemonByToken(currentToken).id);
+  db.touchDaemon(staleId, { providers: [] }, "/tmp/stale");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  db.touchDaemon(currentId, { providers: [] }, "/tmp/current");
+
+  const daemons = db.listDaemons();
+  assert.equal(daemons[0].id, currentId);
+  assert.equal(daemons[1].id, staleId);
   db.close();
 });
 

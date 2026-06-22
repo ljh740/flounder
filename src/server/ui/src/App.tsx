@@ -8,6 +8,7 @@ import {
   type ProjectConfig,
   type ProjectPayload,
   type ProjectSnapshot,
+  type PrepareSummary,
   type PiModel,
   type ProviderProfile,
   type RunRow,
@@ -16,6 +17,7 @@ import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge } fro
 import {
   confirmedDecisions,
   fmtTime,
+  isVerifyRun,
   pct,
   phaseState,
   projectConfig,
@@ -31,9 +33,10 @@ import { Icon, type IconName } from "./icons";
 
 type View = "projects" | "findings" | "settings";
 type SettingsPane = "providers" | "daemons";
-type ProjectTab = "overview" | "findings" | "scopes" | "runs";
-type ModalName = "new-project" | "run" | "edit-project" | "report" | null;
+type ProjectTab = "overview" | "findings" | "scopes" | "runs" | "setup";
+type ModalName = "new-project" | "run" | "edit-project" | "report" | "run-log" | null;
 type ProjectPhase = "prepare" | "map" | "dig" | "confirm";
+type LaunchAction = "run" | "map" | "audit" | "confirm" | "verify";
 
 interface RouteState {
   view: View;
@@ -88,6 +91,14 @@ function go(hash: string) {
   window.location.hash = hash;
 }
 
+function scrollToProjectSection(id: string): void {
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+}
+
 function projectHash(uuid: string): string {
   return `p/${encodeURIComponent(uuid)}`;
 }
@@ -109,7 +120,7 @@ function statusCount(project: ProjectSnapshot, status: string): number {
 }
 
 function totalConfirmed(project: ProjectSnapshot): number {
-  return statusCount(project, "confirmed-differential") + statusCount(project, "confirmed-executable") + statusCount(project, "confirmed-source");
+  return statusCount(project, "confirmed-differential") + statusCount(project, "confirmed-executable");
 }
 
 function daemonAgeMs(daemon: DaemonRow): number {
@@ -119,6 +130,7 @@ function daemonAgeMs(daemon: DaemonRow): number {
 }
 
 function daemonHealth(daemon: DaemonRow): "online" | "recent" | "stale" {
+  if (daemon.online === true) return "online";
   const age = daemonAgeMs(daemon);
   if (age <= ONLINE_MS) return "online";
   if (age <= RECENT_MS) return "recent";
@@ -126,6 +138,7 @@ function daemonHealth(daemon: DaemonRow): "online" | "recent" | "stale" {
 }
 
 function relativeAge(daemon: DaemonRow): string {
+  if (daemon.online === true) return "online";
   const age = daemonAgeMs(daemon);
   if (!Number.isFinite(age)) return "never seen";
   if (age < ONLINE_MS) return "online";
@@ -193,7 +206,11 @@ function requiredProviderProfiles(detail: ProjectDetail, providers: ProviderProf
 }
 
 function providerProfileLabel(provider: ProviderProfile): string {
-  return `${provider.name}${provider.model ? ` · ${provider.model}` : ""}`;
+  const parts = [provider.name];
+  const normalizedName = provider.name.toLowerCase();
+  if (provider.model && !normalizedName.includes(provider.model.toLowerCase())) parts.push(provider.model);
+  if (provider.thinking && !normalizedName.includes(provider.thinking.toLowerCase())) parts.push(provider.thinking);
+  return parts.join(" · ");
 }
 
 function nextAction(finding: FindingRow): string {
@@ -212,7 +229,7 @@ function nextAction(finding: FindingRow): string {
 function formatConfidence(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "";
   const pct = value <= 1 ? Math.round(value * 100) : Math.round(value);
-  return `${pct}%`;
+  return `confidence ${pct}%`;
 }
 
 function coverageModeFromConfig(cfg: { scopeCoverageMode?: string; maxScopes?: number }): CoverageMode {
@@ -290,7 +307,8 @@ function phaseStatusLabel(status: string): string {
   }[status] ?? status;
 }
 
-function runKindLabel(kind: string): string {
+function runKindLabel(kind: string, run?: RunRow): string {
+  if (isVerifyRun(run)) return "Verify";
   return {
     prepare: "Prepare target",
     run: "Map + dig audit",
@@ -301,45 +319,278 @@ function runKindLabel(kind: string): string {
 }
 
 function pendingConfirmFindings(rows: FindingRow[] | undefined): FindingRow[] {
-  return (rows ?? []).filter((finding) => finding.status.startsWith("confirmed") && !finding.confirm_status);
+  return (rows ?? []).filter((finding) => (finding.status === "confirmed-executable" || finding.status === "confirmed-differential") && !finding.confirm_status);
+}
+
+function localVerifiedFindings(rows: FindingRow[] | undefined): FindingRow[] {
+  return (rows ?? []).filter((finding) => finding.status === "confirmed-executable" || finding.status === "confirmed-differential");
+}
+
+function pendingVerifyFindings(rows: FindingRow[] | undefined): FindingRow[] {
+  const unresolved = (rows ?? []).filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source");
+  return topCandidateFindings(unresolved);
+}
+
+function verifyButtonLabel(count: number): string {
+  return count > 0 ? `Verify (${count})` : "Verify";
+}
+
+function verifyButtonTitle(count: number): string {
+  return count > 0
+    ? `Confirm-or-refute ${plural(count, "candidate")} by local execution before real-target confirmation.`
+    : "No suspected or source-confirmed candidates are waiting for execution verification.";
+}
+
+function verifyStatusSummary(rows: FindingRow[] | undefined): string {
+  const passed = localVerifiedFindings(rows).length;
+  const pending = (rows ?? []).filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
+  const refuted = (rows ?? []).filter((finding) => finding.status === "refuted").length;
+  const parts = [];
+  if (passed) parts.push(`${passed} passed`);
+  if (pending) parts.push(`${pending} pending`);
+  if (refuted) parts.push(`${refuted} refuted`);
+  return parts.length ? `Local verification: ${parts.join(" · ")}` : "";
 }
 
 function findingsSummary(detail: ProjectDetail): string {
   const suspected = detail.statusCounts.suspected ?? 0;
-  const confirmed = (detail.statusCounts["confirmed-differential"] ?? 0) + (detail.statusCounts["confirmed-executable"] ?? 0) + (detail.statusCounts["confirmed-source"] ?? 0);
+  const source = detail.statusCounts["confirmed-source"] ?? 0;
+  const confirmed = (detail.statusCounts["confirmed-differential"] ?? 0) + (detail.statusCounts["confirmed-executable"] ?? 0);
   const pieces = [];
   if (suspected) pieces.push(`${plural(suspected, "suspected lead")}`);
+  if (source) pieces.push(`${plural(source, "source-confirmed lead")}`);
   if (confirmed) pieces.push(`${plural(confirmed, "audit-confirmed finding")}`);
   return pieces.length ? pieces.join(" · ") : "No candidate findings yet";
 }
 
+interface RunStages {
+  synthesis?: { scopes?: number; produced?: number; pool?: number; at?: string };
+  differential?: { tested?: number; confirmed?: number; at?: string };
+  refutation?: { candidates?: number; refuted?: number; disputed?: number; at?: string };
+}
+
+function runStages(run: RunRow | undefined): RunStages {
+  if (!run?.stages_json) return {};
+  try {
+    return JSON.parse(run.stages_json) as RunStages;
+  } catch {
+    return {};
+  }
+}
+
+function latestRunWithStage(detail: ProjectDetail, stage: keyof RunStages): RunRow | undefined {
+  return detail.runs.find((run) => Boolean(runStages(run)[stage]));
+}
+
 interface ActivityLine {
   id: number;
-  kind: "thinking" | "text" | "step" | "event";
+  kind: "thinking" | "text" | "event";
   label: string;
   body: string;
   step?: number;
+  meta?: string;
+  time: number;
+}
+
+const STREAM_MERGE_WINDOW_MS = 15_000;
+const STICKY_SCROLL_THRESHOLD_PX = 32;
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+const DEFAULT_PAGE_SIZE = 25;
+
+function normalizeActivityBody(value: string): string {
+  return value.replace(/\n{3,}/g, "\n\n").trimStart();
+}
+
+function activityPreviewLimit(kind: ActivityLine["kind"]): number {
+  return kind === "thinking" ? 900 : kind === "text" ? 1400 : 900;
+}
+
+function basename(pathLike: string): string {
+  const trimmed = pathLike.trim();
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || trimmed;
+}
+
+function actionSummary(detail: string): { label: string; body: string } {
+  const value = detail.trim();
+  const readMatch = value.match(/^(.+?):(\d+)(?:-(\d+))?$/);
+  if (readMatch) {
+    const file = readMatch[1];
+    const start = readMatch[2];
+    const end = readMatch[3];
+    return {
+      label: "Reading source",
+      body: `${basename(file)}:${start}${end ? `-${end}` : ""}\n${file}`,
+    };
+  }
+  const commandHead = value.split(/\s+/).slice(0, 4).join(" ");
+  if (/^(rg|grep|find|ls|cat|sed|awk|npm|pnpm|yarn|forge|cargo|go|python|node|git|jq)\b/.test(value)) {
+    return { label: "Running command", body: commandHead.length < value.length ? `${commandHead} ...\n${value}` : value };
+  }
+  return { label: "Working", body: value };
+}
+
+function formatActivityTime(time: number): string {
+  return new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function usePinnedScroll(trigger: unknown, resetKey: unknown) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const pinnedRef = useRef(true);
+  const [isPinned, setIsPinned] = useState(true);
+
+  const scrollToBottom = () => {
+    const node = scrollRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+    pinnedRef.current = true;
+    setIsPinned(true);
+  };
+
+  const onScroll = () => {
+    const node = scrollRef.current;
+    if (!node) return;
+    const pinned = node.scrollHeight - node.scrollTop - node.clientHeight <= STICKY_SCROLL_THRESHOLD_PX;
+    pinnedRef.current = pinned;
+    setIsPinned(pinned);
+  };
+
+  useEffect(() => {
+    pinnedRef.current = true;
+    setIsPinned(true);
+    const frame = window.requestAnimationFrame(scrollToBottom);
+    return () => window.cancelAnimationFrame(frame);
+  }, [resetKey]);
+
+  useEffect(() => {
+    if (!pinnedRef.current) return;
+    const frame = window.requestAnimationFrame(scrollToBottom);
+    return () => window.cancelAnimationFrame(frame);
+  }, [trigger]);
+
+  return { scrollRef, onScroll, scrollToBottom, isPinned };
+}
+
+function commandRunSummary(detail: string): string {
+  try {
+    const parsed = JSON.parse(detail) as {
+      runId?: string;
+      purpose?: string;
+      passed?: boolean;
+      exitCode?: number;
+      timedOut?: boolean;
+      missing?: number;
+      matched?: number;
+    };
+    const status = parsed.timedOut
+      ? "timed out"
+      : parsed.purpose === "inspect"
+        ? parsed.exitCode === 0
+          ? "completed"
+          : parsed.exitCode === 1
+            ? "no matches"
+            : "error"
+        : parsed.passed
+          ? "passed"
+          : "failed";
+    const pieces = [
+      parsed.runId,
+      parsed.purpose,
+      status,
+      typeof parsed.exitCode === "number" && status !== `exit ${parsed.exitCode}` ? `exit ${parsed.exitCode}` : undefined,
+      parsed.missing ? `${parsed.missing} missing` : undefined,
+      parsed.matched ? `${parsed.matched} matched` : undefined,
+    ].filter(Boolean);
+    return pieces.join(" · ");
+  } catch {
+    return detail;
+  }
+}
+
+function stepMatchesActivity(tool: unknown, label: string): boolean {
+  const name = typeof tool === "string" ? tool : "";
+  if (!name) return true;
+  if (name === "read") return label === "Reading source";
+  if (name === "bash") return label === "Running command";
+  if (name === "write") return label === "Write" || label === "Working";
+  return label === "Working";
+}
+
+function activityDelta(event: ActivityRecord): string | undefined {
+  if (typeof event.delta === "string") return event.delta;
+  if (typeof event.text === "string") return event.text;
+  if (typeof event.detail !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(event.detail) as { delta?: unknown; text?: unknown };
+    if (typeof parsed.delta === "string") return parsed.delta;
+    if (typeof parsed.text === "string") return parsed.text;
+  } catch {
+    // Some persisted streams store the token directly in detail.
+  }
+  return event.detail;
+}
+
+function appendStreamLine(next: ActivityLine[], now: number, kind: ActivityLine["kind"], label: string, delta: string): void {
+  const last = next[next.length - 1];
+  const recentStreamIndex = [...next]
+    .reverse()
+    .findIndex((line) => line.kind === kind && line.label === label && now - line.time <= STREAM_MERGE_WINDOW_MS);
+  if (last?.kind === kind && last.label === label) {
+    next[next.length - 1] = { ...last, body: normalizeActivityBody(`${last.body}${delta}`), time: now };
+  } else if (recentStreamIndex >= 0) {
+    const index = next.length - 1 - recentStreamIndex;
+    const line = next[index];
+    next[index] = { ...line, body: normalizeActivityBody(`${line.body}${delta}`), time: now };
+  } else {
+    next.push({ id: now + next.length, kind, label, body: normalizeActivityBody(delta), time: now });
+  }
+}
+
+function activityEventLabel(kind: string): string {
+  switch (kind) {
+    case "audit_thinking":
+      return "Thinking";
+    case "audit_text":
+      return "Output";
+    case "audit_action":
+      return "Action";
+    case "audit_command_run":
+      return "Command result";
+    case "audit_write":
+      return "Write";
+    case "audit_start":
+      return "Start";
+    default:
+      return kind.replace(/^audit_/, "").replaceAll("_", " ");
+  }
 }
 
 function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): ActivityLine[] {
   const next = [...lines];
   const last = next[next.length - 1];
-  if ((event.kind === "thinking_delta" || event.kind === "text_delta") && typeof event.delta === "string") {
-    const kind = event.kind === "thinking_delta" ? "thinking" : "text";
-    const label = kind === "thinking" ? "Thinking" : "Output";
-    if (last?.kind === kind) {
-      next[next.length - 1] = { ...last, body: `${last.body}${event.delta}`.slice(-4000) };
-    } else {
-      next.push({ id: Date.now() + next.length, kind, label, body: event.delta });
-    }
+  const eventTs = typeof event.ts === "string" ? new Date(event.ts).getTime() : Date.now();
+  const now = Number.isFinite(eventTs) ? eventTs : Date.now();
+  if (event.kind === "thinking_delta") {
+    const delta = activityDelta(event);
+    if (delta) appendStreamLine(next, now, "thinking", "Thinking", delta);
+    return next.slice(-60);
+  }
+  if (event.kind === "text_delta") {
+    const delta = activityDelta(event);
+    if (delta) appendStreamLine(next, now, "text", "Output", delta);
   } else if (event.kind === "step") {
-    next.push({
-      id: Date.now() + next.length,
-      kind: "step",
-      label: "Tool",
-      body: event.tool ? String(event.tool) : "tool call",
-      step: typeof event.step === "number" ? event.step : undefined,
-    });
+    const canAnnotateAction =
+      last?.kind === "event" &&
+      !["Command result", "Start"].includes(last.label) &&
+      stepMatchesActivity(event.tool, last.label);
+    if (canAnnotateAction && now - last.time <= 4_000) {
+      next[next.length - 1] = {
+        ...last,
+        step: typeof event.step === "number" ? event.step : last.step,
+        meta: typeof event.step === "number" ? `Step ${event.step}` : last.meta,
+        time: now,
+      };
+    }
   } else {
     const body = typeof event.detail === "string"
       ? event.detail
@@ -348,9 +599,88 @@ function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): Activ
         : typeof event.result === "string"
           ? event.result
           : event.kind;
-    next.push({ id: Date.now() + next.length, kind: "event", label: event.kind, body });
+    const label = activityEventLabel(event.kind);
+    const action = event.kind === "audit_action" ? actionSummary(body) : undefined;
+    const normalizedBody = event.kind === "audit_command_run" ? commandRunSummary(body) : action?.body ?? body;
+    if (event.kind === "audit_thinking" && last?.kind === "thinking" && now - last.time <= STREAM_MERGE_WINDOW_MS) {
+      next[next.length - 1] = { ...last, body: normalizeActivityBody(normalizedBody), time: now };
+      return next.slice(-60);
+    }
+    if (event.kind === "audit_text") {
+      appendStreamLine(next, now, "text", "Output", normalizedBody);
+      return next.slice(-60);
+    }
+    next.push({
+      id: now + next.length,
+      kind: event.kind === "audit_thinking" ? "thinking" : "event",
+      label: action?.label ?? label,
+      body: normalizeActivityBody(normalizedBody),
+      time: now,
+    });
   }
-  return next.slice(-80);
+  return next.slice(-60);
+}
+
+function ActivityBody({ line, pre = false }: { line: ActivityLine; pre?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const limit = activityPreviewLimit(line.kind);
+  const canExpand = line.body.length > limit;
+  const visibleBody = canExpand && !expanded ? `${line.body.slice(0, limit).trimEnd()}...` : line.body;
+
+  useEffect(() => {
+    if (!canExpand) setExpanded(false);
+  }, [canExpand, line.id]);
+
+  return (
+    <div className={`activity-body-wrap ${pre ? "pre" : ""}`}>
+      {pre ? <pre>{visibleBody}</pre> : <span className="activity-body">{visibleBody}</span>}
+      {canExpand ? (
+        <button
+          className="activity-expand"
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function PaginationControls(props: {
+  total: number;
+  page: number;
+  pageSize: number;
+  label: string;
+  onPage: (page: number) => void;
+  onPageSize: (pageSize: number) => void;
+}) {
+  if (props.total <= 0) return null;
+  const pageCount = Math.max(1, Math.ceil(props.total / props.pageSize));
+  const page = Math.min(Math.max(1, props.page), pageCount);
+  const start = (page - 1) * props.pageSize + 1;
+  const end = Math.min(props.total, page * props.pageSize);
+  return (
+    <div className="pagination" aria-label={`${props.label} pagination`}>
+      <span>{start}-{end} of {plural(props.total, props.label)}</span>
+      <select
+        value={props.pageSize}
+        aria-label={`${props.label} per page`}
+        onChange={(event) => {
+          props.onPageSize(Number(event.target.value));
+          props.onPage(1);
+        }}
+      >
+        {PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} / page</option>)}
+      </select>
+      <div className="pagination-buttons">
+        <Button size="sm" disabled={page <= 1} onClick={() => props.onPage(page - 1)}>Previous</Button>
+        <span>Page {page} / {pageCount}</span>
+        <Button size="sm" disabled={page >= pageCount} onClick={() => props.onPage(page + 1)}>Next</Button>
+      </div>
+    </div>
+  );
 }
 
 function savedBugViews(stats: BugStats): Array<{ id: string; label: string; status?: string; tracking?: string; count: number }> {
@@ -379,11 +709,16 @@ export function App() {
   const [projectFindingStatus, setProjectFindingStatus] = useState("");
   const [modal, setModal] = useState<ModalName>(null);
   const [reportFinding, setReportFinding] = useState<FindingRow | null>(null);
+  const [logRun, setLogRun] = useState<RunRow | null>(null);
+  const [stopConfirmRun, setStopConfirmRun] = useState<RunRow | null>(null);
   const [cmdOpen, setCmdOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const [busy, setBusy] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => initialTheme());
+  const [, setClockTick] = useState(0);
+  const detailRef = useRef<ProjectDetail | null>(null);
+  const detailRefreshRef = useRef(0);
 
   useEffect(() => {
     const onHash = () => setRoute(readRoute());
@@ -397,6 +732,10 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
+    detailRef.current = detail;
+  }, [detail]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -405,6 +744,7 @@ export function App() {
       if (event.key === "Escape") {
         setCmdOpen(false);
         setModal(null);
+        setStopConfirmRun(null);
       }
     };
     addEventListener("keydown", onKey);
@@ -438,7 +778,7 @@ export function App() {
 
   useEffect(() => {
     if (route.view !== "findings") return;
-    const params = new URLSearchParams({ limit: "80" });
+    const params = new URLSearchParams({ limit: "1000" });
     if (bugStatus) params.set("status", bugStatus);
     if (bugTracking) params.set("tracking", bugTracking);
     void api
@@ -453,9 +793,48 @@ export function App() {
   const selectedProject = route.projectUuid ? projects.find((p) => p.uuid === route.projectUuid) : undefined;
   const onlineDaemons = daemons.filter((daemon) => daemonHealth(daemon) === "online");
   const latestRunning = projects.reduce((n, project) => n + (project.activeRuns ?? (project.latestRun?.status === "running" ? 1 : 0)), 0);
+  const visibleRunningRun = detail?.runs.some((run) => run.status === "running") ?? false;
 
-  async function launch(verb: "run" | "map" | "audit" | "confirm") {
+  useEffect(() => {
+    if (!latestRunning && !visibleRunningRun) return;
+    const timer = window.setInterval(() => setClockTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [latestRunning, visibleRunningRun]);
+
+  useEffect(() => {
+    const source = new EventSource("/api/stream");
+    source.onmessage = (message) => {
+      try {
+        const payload = JSON.parse(message.data) as { projects?: ProjectSnapshot[] };
+        if (Array.isArray(payload.projects)) {
+          setProjects(payload.projects);
+          const currentUuid = route.projectUuid;
+          const current = currentUuid ? payload.projects.find((project) => project.uuid === currentUuid) : undefined;
+          const detailStillRunning = detailRef.current?.runs.some((run) => run.status === "running") ?? false;
+          const shouldRefreshDetail = Boolean(current && ((current.activeRuns ?? 0) > 0 || current.latestRun?.status === "running" || detailStillRunning));
+          const now = Date.now();
+          if (currentUuid && shouldRefreshDetail && now - detailRefreshRef.current > 2500) {
+            detailRefreshRef.current = now;
+            void api
+              .project(currentUuid)
+              .then((next) => {
+                if (detailRef.current?.project.uuid === next.project.uuid || route.projectUuid === next.project.uuid) setDetail(next);
+              })
+              .catch(() => {
+                // The normal route fetch and user actions still surface errors; avoid toast spam from the live stream.
+              });
+          }
+        }
+      } catch {
+        // Ignore malformed stream frames; direct API refreshes still work.
+      }
+    };
+    return () => source.close();
+  }, [route.projectUuid]);
+
+  async function launch(action: LaunchAction) {
     if (!route.projectUuid) return;
+    let verifyCandidates: FindingRow[] = [];
     if (detail?.project.uuid === route.projectUuid) {
       const running = detail.runs.find((run) => run.status === "running");
       const selectedDaemon = daemons.find((daemon) => daemon.id === detail.project.daemon_id);
@@ -476,16 +855,24 @@ export function App() {
         return;
       }
       if (running) {
-        setToast({ tone: "warning", message: `${runKindLabel(running.kind)} is already running. Stop it or wait for it to finish before starting another run.` });
+        setToast({ tone: "warning", message: `${runKindLabel(running.kind, running)} is already running. Stop it or wait for it to finish before starting another run.` });
         setModal(null);
         return;
       }
-      if (verb === "confirm" && pendingConfirmFindings(detail.allFindings).length === 0) {
+      if (action === "confirm" && pendingConfirmFindings(detail.allFindings).length === 0) {
         setToast({ tone: "warning", message: "There are no audit-confirmed findings waiting for real-target confirmation yet." });
         setModal(null);
         return;
       }
-      if (verb === "audit" && (detail.progress.pending ?? 0) === 0) {
+      if (action === "verify") {
+        verifyCandidates = pendingVerifyFindings(detail.allFindings);
+        if (verifyCandidates.length === 0) {
+          setToast({ tone: "warning", message: "There are no suspected or source-confirmed candidates waiting for execution verification." });
+          setModal(null);
+          return;
+        }
+      }
+      if (action === "audit" && (detail.progress.pending ?? 0) === 0) {
         setToast({ tone: "warning", message: "There are no pending scopes to dig. Run map first or continue audit when new scopes are available." });
         setModal(null);
         return;
@@ -493,13 +880,18 @@ export function App() {
     }
     setBusy(true);
     try {
-      const result = (await api.launchRun(route.projectUuid, { verb })) as LaunchResult;
+      const verb = action === "verify" ? "audit" : action;
+      const result = (await api.launchRun(route.projectUuid, {
+        verb,
+        ...(action === "verify" ? { verifyFindings: verifyCandidates } : {}),
+      })) as LaunchResult;
       const waiting = (result.daemons ?? 0) === 0;
+      const label = action === "verify" ? "verify" : verb;
       setToast({
         tone: waiting ? "warning" : "success",
         message: waiting
-          ? `${verb} queued, but no online daemon is connected. Start a daemon to claim the job.`
-          : `${verb} queued for ${plural(result.daemons ?? 0, "daemon")}.`,
+          ? `${label} queued, but no online daemon is connected. Start a daemon to claim the job.`
+          : `${label} queued for ${plural(result.daemons ?? 0, "daemon")}.`,
       });
       await refreshBase();
     } catch (error) {
@@ -514,7 +906,7 @@ export function App() {
     try {
       await api.trackFinding(finding.id, status);
       if (route.view === "findings") {
-        const params = new URLSearchParams({ limit: "80" });
+        const params = new URLSearchParams({ limit: "1000" });
         if (bugStatus) params.set("status", bugStatus);
         if (bugTracking) params.set("tracking", bugTracking);
         const res = await api.bugs(params);
@@ -540,14 +932,34 @@ export function App() {
   }
 
   async function stopRun(run: RunRow) {
+    setBusy(true);
     try {
       await api.stopRun(run.id);
+      setStopConfirmRun(null);
       setToast({ tone: "success", message: `Stop requested for ${run.kind} run #${run.id}.` });
       if (route.projectUuid) setDetail(await api.project(route.projectUuid));
       await refreshBase();
     } catch (error) {
       setToast({ tone: "error", message: String(error instanceof Error ? error.message : error) });
+    } finally {
+      setBusy(false);
     }
+  }
+
+  async function updateRunTarget(run: RunRow, target: number) {
+    try {
+      await api.updateRun(run.id, { runScopesTarget: target });
+      setToast({ tone: "success", message: `Run #${run.id} target updated to ${target}.` });
+      if (route.projectUuid) setDetail(await api.project(route.projectUuid));
+      await refreshBase();
+    } catch (error) {
+      setToast({ tone: "error", message: String(error instanceof Error ? error.message : error) });
+    }
+  }
+
+  function openRunLog(run: RunRow) {
+    setLogRun(run);
+    setModal("run-log");
   }
 
   return (
@@ -599,7 +1011,9 @@ export function App() {
                   }}
                   onTracking={updateTracking}
                   onPatchScope={patchScope}
-                  onStopRun={(run) => void stopRun(run)}
+                  onStopRun={setStopConfirmRun}
+                  onUpdateRunTarget={(run, target) => void updateRunTarget(run, target)}
+                  onOpenRunLog={openRunLog}
                 />
               ) : projects.length ? (
                 <EmptyState
@@ -645,9 +1059,18 @@ export function App() {
           onError={(message) => setToast({ tone: "error", message })}
         />
       ) : null}
-      {modal === "run" && detail ? <RunModal detail={detail} busy={busy} onClose={() => setModal(null)} onLaunch={launch} /> : null}
+      {modal === "run" && detail ? <RunModal detail={detail} busy={busy} onClose={() => setModal(null)} onLaunch={launch} onUpdateRunTarget={(run, target) => void updateRunTarget(run, target)} onError={(message) => setToast({ tone: "error", message })} /> : null}
       {modal === "edit-project" && detail ? <EditProjectModal detail={detail} providers={providers} daemons={daemons} onClose={() => setModal(null)} onSaved={async () => { setDetail(await api.project(detail.project.uuid)); setModal(null); }} onError={(message) => setToast({ tone: "error", message })} /> : null}
       {modal === "report" && reportFinding ? <ReportModal finding={reportFinding} onClose={() => setModal(null)} /> : null}
+      {modal === "run-log" && logRun ? <RunLogModal run={logRun} onClose={() => { setModal(null); setLogRun(null); }} /> : null}
+      {stopConfirmRun ? (
+        <StopRunConfirmModal
+          run={stopConfirmRun}
+          busy={busy}
+          onCancel={() => setStopConfirmRun(null)}
+          onConfirm={() => void stopRun(stopConfirmRun)}
+        />
+      ) : null}
       {toast ? <ToastView toast={toast} onClose={() => setToast(null)} /> : null}
     </>
   );
@@ -708,24 +1131,25 @@ function ProjectSidebar({ projects, selected, onSelect, onNew }: { projects: Pro
         <Button variant={projects.length ? "primary" : undefined} icon="package" onClick={onNew}>New project</Button>
       </div>
       <input className="searchbar" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter projects..." aria-label="Filter projects" />
-      <div className="project-list" role="list">
+      <ul className="project-list" role="list">
         {filtered.map((project) => (
-          <button
-            key={project.uuid}
-            type="button"
-            role="listitem"
-            className={`project-row${selected === project.uuid ? " sel" : ""}`}
-            aria-current={selected === project.uuid ? "page" : undefined}
-            onClick={() => onSelect(project.uuid)}
-          >
-            <span className="project-row-top">
-              <span className="project-name">{shortName(project.name, 31)}</span>
-              <StateBadge status={project.latestRun?.status} />
-            </span>
-            <ProjectProgress project={project} />
-          </button>
+          <li key={project.uuid}>
+            <button
+              type="button"
+              className={`project-row${selected === project.uuid ? " sel" : ""}`}
+              aria-current={selected === project.uuid ? "page" : undefined}
+              aria-label={`Open project ${project.name}`}
+              onClick={() => onSelect(project.uuid)}
+            >
+              <span className="project-row-top">
+                <span className="project-name">{shortName(project.name, 31)}</span>
+                <StateBadge status={project.latestRun?.status} />
+              </span>
+              <ProjectProgress project={project} />
+            </button>
+          </li>
         ))}
-      </div>
+      </ul>
     </aside>
   );
 }
@@ -757,13 +1181,15 @@ function ProjectDetailView(props: {
   findingStatus: string;
   setFindingStatus: (status: string) => void;
   busy: boolean;
-  onLaunch: (verb: "run" | "map" | "audit" | "confirm") => void;
+  onLaunch: (action: LaunchAction) => void;
   onOpenRunModal: () => void;
   onOpenEdit: () => void;
   onOpenReport: (finding: FindingRow) => void;
   onTracking: (finding: FindingRow, status: string) => void;
   onPatchScope: (scopeId: string, body: unknown) => void;
   onStopRun: (run: RunRow) => void;
+  onUpdateRunTarget: (run: RunRow, target: number) => void;
+  onOpenRunLog: (run: RunRow) => void;
 }) {
   const { project, detail, providers, daemons, tab, setTab } = props;
   const provider = providers.find((p) => p.id === detail.project.provider_id);
@@ -777,6 +1203,9 @@ function ProjectDetailView(props: {
   const reproduced = confirmedDecisions(detail.confirmDecisions).length;
   const runningRun = detail.runs.find((run) => run.status === "running");
   const pendingConfirm = pendingConfirmFindings(detail.allFindings).length;
+  const pendingVerify = pendingVerifyFindings(detail.allFindings).length;
+  const localVerifySummary = verifyStatusSummary(detail.allFindings);
+  const setupAttention = prepareMaterialsAttention(detail.prepareSummary);
   const launchLocked = props.busy || Boolean(runningRun);
   const requiredProviders = requiredProviderProfiles(detail, providers);
   const authStatuses = requiredProviders.map((profile) => ({ profile, status: daemonHasProvider(selectedDaemon, profile.provider) }));
@@ -811,7 +1240,7 @@ function ProjectDetailView(props: {
     if (runningRun?.kind === "prepare" && online.length === 0) {
       return {
         stat: "Waiting for daemon",
-        detail: `Acquire source, match deployment, warm the build sandbox${phases.prepare.dur ? ` · ${phases.prepare.dur}` : ""}`,
+        detail: "Acquire source, match deployment, warm the build sandbox",
       };
     }
     if (phases.prepare.status === "none" && (config.sourcePaths.length || config.buildRoot)) {
@@ -822,14 +1251,13 @@ function ProjectDetailView(props: {
     }
     return {
       stat: phases.prepare.stat,
-      detail: `Acquire source, match deployment, warm the build sandbox${phases.prepare.dur ? ` · ${phases.prepare.dur}` : ""}`,
+      detail: "Acquire source, match deployment, warm the build sandbox",
     };
   })();
   const phaseDisplayStatus = (phase: "prepare" | "map" | "dig" | "confirm") => {
     if (phase === "prepare" && phases.prepare.status === "none" && (config.sourcePaths.length || config.buildRoot)) return "ready";
     return phases[phase].status;
   };
-
   return (
     <div className="project-page">
       <Card>
@@ -842,6 +1270,7 @@ function ProjectDetailView(props: {
             <div className="subtle-line">
               {provider ? providerProfileLabel(provider) : "no provider set"} · {selectedDaemon ? selectedDaemon.name ?? `daemon-${selectedDaemon.id}` : "no daemon selected"} · {detail.project.dir || project.name}
             </div>
+            {localVerifySummary ? <div className="subtle-line verify-summary">{localVerifySummary}</div> : null}
             {phaseOverrides.length ? (
               <div className="subtle-line phase-summary">
                 {phaseOverrides.map((entry) => `${phaseLabel(entry.phase)}: ${entry.provider?.name}`).join(" · ")}
@@ -859,19 +1288,28 @@ function ProjectDetailView(props: {
               {runningRun ? "Audit running" : "Continue audit"}
             </Button>
             <Button
+              icon="search"
+              disabled={launchLocked || pendingVerify === 0}
+              title={verifyButtonTitle(pendingVerify)}
+              aria-label={verifyButtonTitle(pendingVerify)}
+              onClick={() => props.onLaunch("verify")}
+            >
+              {verifyButtonLabel(pendingVerify)}
+            </Button>
+            <Button
               icon="shieldcheck"
               disabled={launchLocked || pendingConfirm === 0}
               title={pendingConfirm === 0 ? "Confirm becomes available after dig produces an audit-confirmed finding." : "Reproduce audit-confirmed findings on the real target."}
+              aria-label={pendingConfirm > 0 ? `Confirm ${plural(pendingConfirm, "finding")} on the real target.` : "Confirm becomes available after dig produces an audit-confirmed finding."}
               onClick={() => props.onLaunch("confirm")}
             >
-              {pendingConfirm > 0 ? `Confirm target (${pendingConfirm})` : "Confirm target"}
+              {pendingConfirm > 0 ? `Confirm (${pendingConfirm})` : "Confirm"}
             </Button>
             {runningRun ? <Button variant="danger" icon="x" onClick={() => props.onStopRun(runningRun)}>Stop run</Button> : null}
             <IconButton
               icon="kebab"
-              disabled={launchLocked}
-              title={runningRun ? "Run options are locked while this project is running." : "Run options"}
-              aria-label="Run options"
+              title={runningRun ? "Run settings" : "More actions"}
+              aria-label={runningRun ? "Run settings" : "More actions"}
               onClick={props.onOpenRunModal}
             />
             <IconButton icon="pencil" title="Edit config" aria-label="Edit config" onClick={props.onOpenEdit} />
@@ -879,7 +1317,7 @@ function ProjectDetailView(props: {
         </div>
         {runningRun ? (
           <div className="info-panel run-notice">
-            <strong>{online.length ? `${runKindLabel(runningRun.kind)} is running.` : `${runKindLabel(runningRun.kind)} is waiting for a daemon.`}</strong>
+            <strong>{online.length ? `${runKindLabel(runningRun.kind, runningRun)} is running.` : `${runKindLabel(runningRun.kind, runningRun)} is waiting for a daemon.`}</strong>
             <span>
               {online.length
                 ? "New launches are locked until this run finishes or you stop it."
@@ -890,34 +1328,48 @@ function ProjectDetailView(props: {
         <div className="pipeline" aria-label="Audit pipeline">
           {(["prepare", "map", "dig", "confirm"] as const).map((phase) => {
             const displayStatus = phaseDisplayStatus(phase);
+            const label = phase === "dig" && isVerifyRun(runningRun) ? "Verify" : phaseLabel(phase);
             return (
               <div key={phase} className={`phase ${displayStatus}`}>
                 <span className="phase-head">
-                  <span className="phase-title"><span className="phase-marker"><Icon name={phaseIcon(phase)} size={13} /></span>{phaseLabel(phase)}</span>
+                  <span className="phase-title"><span className="phase-marker"><Icon name={phaseIcon(phase)} size={13} /></span>{label}</span>
                   <span className={`phase-state ${displayStatus}`}>{phaseStatusLabel(displayStatus)}</span>
                 </span>
                 <strong>{phase === "prepare" ? prepareInfo.stat : phases[phase].stat}</strong>
-                <small>{phase === "prepare" ? prepareInfo.detail : `${PHASE_DESC[phase]}${phases[phase].dur ? ` · ${phases[phase].dur}` : ""}`}</small>
+                <small className="phase-detail">
+                  <span>{phase === "prepare" ? prepareInfo.detail : PHASE_DESC[phase]}</span>
+                  {phases[phase].dur ? <span className="phase-time">{phases[phase].dur}</span> : null}
+                </small>
               </div>
             );
           })}
         </div>
         <div className="stats">
-          <Stat n={detail.progress.total} label="scopes" />
-          <Stat n={detail.findingsTotal} label="findings" />
-          <Stat n={candidates.length} label="top candidates" />
-          <Stat n={confirmed} label="confirmed" good />
-          <Stat n={reproduced} label="reproduced" />
-          <Stat n={detail.runsTotal} label="runs" />
+          <Stat n={detail.progress.total} label="scopes" onClick={() => setTab("scopes")} />
+          <Stat n={detail.findingsTotal} label="findings" onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); setTab("findings"); }} />
+          <Stat n={candidates.length} label="top candidates" onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); setTab("overview"); scrollToProjectSection("project-top-candidates"); }} />
+          <Stat n={confirmed} label="confirmed" good onClick={() => { props.setFindingStatus("execution-confirmed"); props.setFindingQuery(""); setTab("findings"); }} />
+          <Stat n={reproduced} label="reproduced" onClick={() => setTab("overview")} />
+          <Stat n={detail.runsTotal} label="runs" onClick={() => setTab("runs")} />
         </div>
         <ProjectSetupDisclosure items={readyItems} />
       </Card>
       <div className="tabs" role="tablist" aria-label="Project sections">
-        {(["overview", "findings", "scopes", "runs"] as ProjectTab[]).map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "sel" : ""} onClick={() => setTab(t)}>{t}</button>
+        {(["overview", "findings", "scopes", "runs", "setup"] as ProjectTab[]).map((t) => (
+          <button
+            key={t}
+            role="tab"
+            aria-selected={tab === t}
+            className={tab === t ? "sel" : ""}
+            title={t === "setup" && setupAttention ? setupAttention.label : undefined}
+            onClick={() => setTab(t)}
+          >
+            <span>{t}</span>
+            {t === "setup" && setupAttention ? <span className={`tab-alert-dot ${setupAttention.tone}`} aria-hidden="true" /> : null}
+          </button>
         ))}
       </div>
-      {tab === "overview" ? <ProjectOverview detail={detail} candidates={candidates} onOpenReport={props.onOpenReport} /> : null}
+      {tab === "overview" ? <ProjectOverview detail={detail} candidates={candidates} verifyCount={pendingVerify} verifyLocked={launchLocked || pendingVerify === 0} onVerifyCandidates={() => props.onLaunch("verify")} onOpenReport={props.onOpenReport} /> : null}
       {tab === "findings" ? (
         <ProjectFindings
           detail={detail}
@@ -930,9 +1382,25 @@ function ProjectDetailView(props: {
         />
       ) : null}
       {tab === "scopes" ? <ScopesView detail={detail} onPatchScope={props.onPatchScope} /> : null}
-      {tab === "runs" ? <RunsView detail={detail} onStopRun={props.onStopRun} /> : null}
+      {tab === "runs" ? <RunsView detail={detail} onStopRun={props.onStopRun} onOpenLog={props.onOpenRunLog} /> : null}
+      {tab === "setup" ? <ProjectSetupTab detail={detail} /> : null}
     </div>
   );
+}
+
+function prepareMaterialsAttention(summary?: PrepareSummary | null): { tone: "warn" | "pending"; label: string } | null {
+  if (!summary) return null;
+  const issues = summary.issues?.length ?? 0;
+  const gaps = summary.gaps?.length ?? 0;
+  const manifestMissing = summary.manifestStatus && summary.manifestStatus !== "present" ? 1 : 0;
+  const manifestState = summary.manifestState?.toLowerCase();
+  const manifestPartial = manifestState && !["complete", "ready", "ok"].includes(manifestState) ? 1 : 0;
+  const count = issues + gaps + manifestMissing + manifestPartial;
+  if (count <= 0) return null;
+  return {
+    tone: manifestMissing ? "pending" : "warn",
+    label: `Prepared materials need review: ${plural(count, "issue")}`,
+  };
 }
 
 function ProjectSetupDisclosure({ items }: { items: Array<{ label: string; state: string; ok: boolean }> }) {
@@ -958,19 +1426,43 @@ function ProjectSetupDisclosure({ items }: { items: Array<{ label: string; state
   );
 }
 
-function Stat({ n, label, good }: { n: number; label: string; good?: boolean }) {
-  return (
-    <div className="stat">
+function Stat({ n, label, good, onClick }: { n: number; label: string; good?: boolean; onClick?: () => void }) {
+  const content = (
+    <>
       <strong className={good ? "good" : ""}>{n}</strong>
       <span>{label}</span>
+    </>
+  );
+  return onClick ? (
+    <button type="button" className="stat stat-button" onClick={onClick}>
+      {content}
+    </button>
+  ) : (
+    <div className="stat">
+      {content}
     </div>
   );
 }
 
-function ProjectOverview({ detail, candidates, onOpenReport }: { detail: ProjectDetail; candidates: FindingRow[]; onOpenReport: (finding: FindingRow) => void }) {
+function ProjectOverview({
+  detail,
+  candidates,
+  verifyCount,
+  verifyLocked,
+  onVerifyCandidates,
+  onOpenReport,
+}: {
+  detail: ProjectDetail;
+  candidates: FindingRow[];
+  verifyCount: number;
+  verifyLocked: boolean;
+  onVerifyCandidates: () => void;
+  onOpenReport: (finding: FindingRow) => void;
+}) {
   const current = detail.runs.find((run) => run.status === "running") ?? detail.runs[0];
   const runningRun = detail.runs.find((run) => run.status === "running");
   const pendingConfirm = pendingConfirmFindings(detail.allFindings).length;
+  const sourceConfirmed = detail.statusCounts["confirmed-source"] ?? 0;
   const decisions = detail.confirmDecisions.length;
   const reproduced = confirmedDecisions(detail.confirmDecisions).length;
   const progress = detail.progress;
@@ -978,36 +1470,183 @@ function ProjectOverview({ detail, candidates, onOpenReport }: { detail: Project
   const scopeDetail = progress.total > 0
     ? `${plural(progress.pending, "pending scope")}${progress.deferred ? ` · ${plural(progress.deferred, "deferred scope")}` : ""}`
     : "Run Map scopes or Continue audit to create the inventory.";
-  const runValue = current ? runKindLabel(current.kind) : "No runs yet";
+  const runValue = current ? runKindLabel(current.kind, current) : "No runs yet";
   const runDetail = current ? `${current.status} · ${runProgress(current, detail.confirmDecisions)}` : "Start Continue audit to prepare source, map scopes, and dig.";
+  const synthesis = runStages(latestRunWithStage(detail, "synthesis")).synthesis;
+  const verifyValue = verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : "No candidates";
+  const verifyDetail = verifyCount
+    ? `${plural(sourceConfirmed, "source-confirmed lead")} · ${plural((detail.statusCounts.suspected ?? 0), "suspected lead")} still need execution verification`
+    : pendingConfirm
+      ? "Execution-confirmed findings can move to real-target confirmation."
+      : "Synthesis and dig outputs appear as candidates here.";
+  const synthesisValue = synthesis
+    ? `${synthesis.produced ?? 0} composed ${synthesis.produced === 1 ? "lead" : "leads"}`
+    : progress.audited > 0
+      ? "No synthesis output"
+      : "Not run yet";
+  const synthesisDetail = synthesis
+    ? `${plural(synthesis.pool ?? 0, "input finding")} across ${plural(synthesis.scopes ?? 0, "scope")}`
+    : progress.audited > 0
+      ? "Cross-scope composition has not produced a new candidate."
+      : "Runs after dig when findings exist.";
   const proofDetail = pendingConfirm
-    ? `${plural(pendingConfirm, "finding")} waiting for Confirm target`
+    ? `${plural(pendingConfirm, "finding")} waiting for Confirm`
     : decisions
       ? `${reproduced}/${decisions} confirm decisions reproduced`
       : "Available after an audit-confirmed finding exists";
   return (
     <>
       {runningRun ? <LiveActivityPanel run={runningRun} /> : null}
+      <div id="project-top-candidates" className="section-anchor">
+        <Card title={<span>Most suspicious bugs <Counter>{candidates.length}</Counter></span>}>
+          <div className="candidate-head">
+            <div>
+              <strong>{verifyCount ? `${verifyCount} unresolved ${verifyCount === 1 ? "candidate needs" : "candidates need"} verification` : "No candidate waiting for execution verification"}</strong>
+              <small>Dig results and synthesis outputs are ranked here before real-target confirmation.</small>
+            </div>
+            <Button size="sm" icon="search" disabled={verifyLocked} title={verifyButtonTitle(verifyCount)} aria-label={verifyButtonTitle(verifyCount)} onClick={onVerifyCandidates}>
+              {verifyButtonLabel(verifyCount)}
+            </Button>
+          </div>
+          <FindingList findings={candidates} compact empty="Candidate findings appear here after dig audits mapped scopes and a claim survives local confirmation." onOpenReport={onOpenReport} />
+        </Card>
+      </div>
       <Card title="Audit status">
         <div className="queue-grid">
           <QueueItem label="Current run" value={runValue} detail={runDetail} />
           <QueueItem label="Scope coverage" value={scopeValue} detail={scopeDetail} />
-          <QueueItem label="Audit findings" value={plural(detail.findingsTotal, "finding")} detail={findingsSummary(detail)} />
+          <QueueItem label="Synthesis" value={synthesisValue} detail={synthesisDetail} />
+          <QueueItem label="Candidate verification" value={verifyValue} detail={verifyDetail} />
           <QueueItem label="Real-target proof" value={plural(reproduced, "reproduced finding")} detail={proofDetail} />
         </div>
       </Card>
-      <Card title="Most suspicious bugs">
-        <FindingList findings={candidates} compact empty="Candidate findings appear here after dig audits mapped scopes and a claim survives local confirmation." onOpenReport={onOpenReport} />
-      </Card>
     </>
   );
+}
+
+function ProjectSetupTab({ detail }: { detail: ProjectDetail }) {
+  return detail.prepareSummary ? (
+    <PrepareMaterialsCard summary={detail.prepareSummary} />
+  ) : (
+    <Card title="Prepared materials">
+      <EmptyInline>Prepared source, corpus, deployment matching, and sandbox details appear here after a prepare run.</EmptyInline>
+    </Card>
+  );
+}
+
+function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
+  const components = summary.components ?? [];
+  const issues = summary.issues ?? [];
+  const gaps = summary.gaps ?? [];
+  const manifestReady = summary.manifestStatus === "present";
+  const needsReview = issues.length > 0 || gaps.length > 0;
+  const quality = needsReview ? "warn" : manifestReady ? "ok" : "pending";
+  const workspace = summary.workspace ?? {};
+  const filesLabel = workspace.filesTruncated ? `${(workspace.files ?? 0).toLocaleString()}+` : (workspace.files ?? 0).toLocaleString();
+  const scopeDeclaration = readableScopeDeclaration(summary.scopeDeclaration);
+  return (
+    <Card title={<span>Prepared materials <Counter>{summary.componentsTotal ?? 0}</Counter></span>}>
+      <div className="prepare-materials">
+        <div className="prepare-head">
+          <div className={`prepare-quality ${quality}`}>
+            <span className="dot" />
+            <span>
+              <strong>{needsReview ? "Needs review" : manifestReady ? "Ready for sealed audit" : "Preparing materials"}</strong>
+              <small>
+                Run #{summary.runId ?? "-"} · {summary.status ?? "unknown"} · manifest {summary.manifestStatus ?? "unknown"}{summary.manifestState ? ` · ${summary.manifestState}` : ""}
+              </small>
+            </span>
+          </div>
+          <div className="prepare-kpis">
+            <span><strong>{summary.inScope ?? 0}</strong> in scope</span>
+            <span><strong>{summary.matched ?? 0}</strong> matched</span>
+            <span><strong>{summary.unverified ?? 0}</strong> unverified</span>
+            <span title={workspace.filesTruncated ? `Workspace scan stopped after ${workspace.fileLimit ?? workspace.files ?? 0} files.` : undefined}><strong>{filesLabel}</strong> files</span>
+          </div>
+        </div>
+        {scopeDeclaration ? <p className="prepare-scope">{scopeDeclaration}</p> : null}
+        <div className="prepare-meta">
+          <span>Answer firewall: <strong>{summary.answerFirewall || "not reported"}</strong></span>
+          {summary.posture ? <span>Posture: <strong>{summary.posture}</strong></span> : null}
+        </div>
+        {components.length ? (
+          <div className="prepare-components" aria-label="Prepared components">
+            {components.map((component, index) => (
+              <div className="prepare-component" key={`${component.identity ?? "component"}-${index}`}>
+                <span className={`label ${component.match === "matched" || component.match === "n/a" ? "s-confirmed-source" : component.match === "unverified" ? "s-suspected" : "s-refuted"}`}>
+                  {component.match || "unreported"}
+                </span>
+                <div>
+                  <strong>{component.identity || component.stagedPath || "unknown component"}</strong>
+                  <small>
+                    {[component.role, component.source, component.revision, component.stagedPath ? tailPath(component.stagedPath) : ""].filter(Boolean).join(" · ")}
+                  </small>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyInline>No prepared components have been reported yet.</EmptyInline>
+        )}
+        {issues.length || gaps.length ? (
+          <div className="prepare-lists">
+            {issues.length ? <PrepareList title="Issues" items={issues} tone="warn" /> : null}
+            {gaps.length ? <PrepareList title="Gaps" items={gaps} /> : null}
+          </div>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
+function readableScopeDeclaration(value?: string): string {
+  if (!value) return "";
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return value;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const parts: string[] = [];
+    const source = parsed.source;
+    if (typeof source === "string" && source.trim()) parts.push(`Source: ${source.trim()}`);
+    const basis = parsed.basis;
+    if (Array.isArray(basis)) {
+      const items = basis.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+      if (items.length) parts.push(`Basis: ${items.slice(0, 2).join(" · ")}`);
+    }
+    const rule = parsed.in_scope_rule;
+    if (typeof rule === "string" && rule.trim()) parts.push(`Scope: ${rule.trim()}`);
+    const components = parsed.in_scope_component_ids;
+    if (Array.isArray(components)) {
+      const names = components.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+      if (names.length) parts.push(`Components: ${names.join(", ")}`);
+    }
+    return parts.join(" · ") || "Scope declaration reported";
+  } catch {
+    return value;
+  }
+}
+
+function PrepareList({ title, items, tone }: { title: string; items: string[]; tone?: "warn" }) {
+  return (
+    <div className={`prepare-list ${tone ?? ""}`}>
+      <strong>{title}</strong>
+      <ul>
+        {items.slice(0, 6).map((item, index) => <li key={`${title}-${index}`}>{item}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+function tailPath(value: string, parts = 3): string {
+  const chunks = value.split("/").filter(Boolean);
+  return chunks.length > parts ? `.../${chunks.slice(-parts).join("/")}` : value;
 }
 
 function LiveActivityPanel({ run }: { run: RunRow }) {
   const [lines, setLines] = useState<ActivityLine[]>([]);
   const [connected, setConnected] = useState(false);
   const [failed, setFailed] = useState(false);
-  const activityTimelineRef = useRef<HTMLDivElement | null>(null);
+  const activityScroll = usePinnedScroll(lines, run.id);
   useEffect(() => {
     setLines([]);
     setFailed(false);
@@ -1031,17 +1670,13 @@ function LiveActivityPanel({ run }: { run: RunRow }) {
     };
     return () => source.close();
   }, [run.id]);
-  useEffect(() => {
-    const timeline = activityTimelineRef.current;
-    if (timeline) timeline.scrollTop = timeline.scrollHeight;
-  }, [lines.length]);
   return (
     <Card>
       <div className="activity-panel" aria-live="polite">
         <div className="activity-head">
           <div>
             <span className="section-title inline">Live activity</span>
-            <strong>{runKindLabel(run.kind)}</strong>
+            <strong>{runKindLabel(run.kind, run)}</strong>
             <small>Run #{run.id} · {runProgress(run, [])}</small>
           </div>
           <span className={`activity-connection ${connected ? "on" : failed ? "warn" : ""}`}>
@@ -1050,16 +1685,25 @@ function LiveActivityPanel({ run }: { run: RunRow }) {
           </span>
         </div>
         {lines.length ? (
-          <div className="activity-timeline" ref={activityTimelineRef}>
-            {lines.map((line) => (
-              <div key={line.id} className={`activity-entry ${line.kind}`}>
-                <span className="activity-dot" />
-                <div className="activity-content">
-                  <span className="activity-kicker">{line.step ? `Step ${line.step}` : line.label}</span>
-                  <span className="activity-body">{line.body}</span>
+          <div className="activity-scroll-wrap">
+            <div className="activity-timeline" ref={activityScroll.scrollRef} onScroll={activityScroll.onScroll}>
+              {lines.map((line) => (
+                <div key={line.id} className={`activity-entry ${line.kind}`}>
+                  <span className="activity-dot" />
+                  <div className="activity-content">
+                    <span className="activity-kicker">
+                      <span>{line.label}</span>
+                      <span className="activity-meta">
+                        {line.meta ? <span>{line.meta}</span> : line.step ? <span>{`Step ${line.step}`}</span> : null}
+                        <time dateTime={new Date(line.time).toISOString()}>{formatActivityTime(line.time)}</time>
+                      </span>
+                    </span>
+                    <ActivityBody line={line} />
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
+            {!activityScroll.isPinned ? <button className="latest-button" type="button" onClick={activityScroll.scrollToBottom}>Latest</button> : null}
           </div>
         ) : (
           <div className="activity-empty">
@@ -1092,7 +1736,7 @@ function ProjectFindings(props: {
   onTracking: (finding: FindingRow, status: string) => void;
 }) {
   const rows = (props.detail.allFindings ?? [])
-    .filter((f) => !props.status || f.status === props.status)
+    .filter((f) => !props.status || (props.status === "execution-confirmed" ? f.status === "confirmed-executable" || f.status === "confirmed-differential" : f.status === props.status))
     .filter((f) => !props.query || `${f.title ?? ""} ${f.location ?? ""}`.toLowerCase().includes(props.query.toLowerCase()))
     .sort((a, b) => severityScore(b) - severityScore(a));
   const empty = (props.detail.allFindings ?? []).length
@@ -1104,36 +1748,57 @@ function ProjectFindings(props: {
         <input className="searchbar" value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="Search findings..." aria-label="Search findings" />
         <select value={props.status} onChange={(event) => props.setStatus(event.target.value)} aria-label="Filter finding status">
           <option value="">All statuses</option>
+          <option value="execution-confirmed">Execution confirmed</option>
           {STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}
         </select>
       </div>
-      <FindingTable rows={rows} empty={empty} onOpenReport={props.onOpenReport} onTracking={props.onTracking} />
+      <FindingTable rows={rows} paginationKey={`${props.status}:${props.query}`} empty={empty} onOpenReport={props.onOpenReport} onTracking={props.onTracking} />
     </Card>
   );
 }
 
 function ScopesView({ detail, onPatchScope }: { detail: ProjectDetail; onPatchScope: (scopeId: string, body: unknown) => void }) {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const scopes = sortScopes(detail.scopes ?? []);
+  const pageCount = Math.max(1, Math.ceil(scopes.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pageScopes = scopes.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
   return (
     <Card title={<span>Scopes <Counter>{scopes.length}</Counter></span>}>
       {scopes.length ? (
-        <div className="scope-list">
-          {scopes.map((scope) => (
-            <div className="scope-row" key={scope.scope_id}>
-              <span className={`label s-${scope.status}`}>{scope.status}</span>
-              <div>
-                <strong>{scope.title || scope.scope_id}</strong>
-                <small>{scope.location || scope.scope_id}</small>
+        <>
+          <div className="scope-list">
+            {pageScopes.map((scope) => (
+              <div className="scope-row" key={scope.scope_id}>
+                <span className={`label s-${scope.status}`}>{scope.status}</span>
+                <div>
+                  <strong>{scope.title || scope.scope_id}</strong>
+                  <small>{scope.location || scope.scope_id}</small>
+                </div>
+                <span className="score">{scope.score ?? scope.priority ?? ""}</span>
+                <div className="row-actions">
+                  {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { prioritize: true })}>Top</Button> : null}
+                  {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { status: "deferred" })}>Skip</Button> : null}
+                  {scope.status === "deferred" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { status: "pending" })}>Resume</Button> : null}
+                </div>
               </div>
-              <span className="score">{scope.score ?? scope.priority ?? ""}</span>
-              <div className="row-actions">
-                {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { prioritize: true })}>Top</Button> : null}
-                {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { status: "deferred" })}>Skip</Button> : null}
-                {scope.status === "deferred" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { status: "pending" })}>Resume</Button> : null}
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+          <PaginationControls
+            total={scopes.length}
+            page={safePage}
+            pageSize={pageSize}
+            label="scope"
+            onPage={setPage}
+            onPageSize={setPageSize}
+          />
+        </>
       ) : (
         <EmptyInline>No scopes mapped yet. Run Map scopes or Continue audit to create the scope inventory before digging.</EmptyInline>
       )}
@@ -1141,7 +1806,7 @@ function ScopesView({ detail, onPatchScope }: { detail: ProjectDetail; onPatchSc
   );
 }
 
-function RunsView({ detail, onStopRun }: { detail: ProjectDetail; onStopRun: (run: RunRow) => void }) {
+function RunsView({ detail, onStopRun, onOpenLog }: { detail: ProjectDetail; onStopRun: (run: RunRow) => void; onOpenLog: (run: RunRow) => void }) {
   return (
     <Card title={<span>Runs <Counter>{detail.runs.length}</Counter></span>}>
       {detail.runs.length ? (
@@ -1150,12 +1815,13 @@ function RunsView({ detail, onStopRun }: { detail: ProjectDetail; onStopRun: (ru
             <div key={run.id} className="run-row">
               <StateBadge status={run.status} />
               <div>
-                <strong>{runKindLabel(run.kind)}</strong>
+                <strong>{runKindLabel(run.kind, run)}</strong>
                 <small>{runProgress(run, detail.confirmDecisions)}</small>
               </div>
               <code>{run.run_dir?.split("/").pop() ?? "-"}</code>
               <span>{fmtTime(run.started_at)}</span>
               <div className="row-actions">
+                <Button size="sm" onClick={() => onOpenLog(run)}>{run.status === "error" ? "Error log" : "Log"}</Button>
                 {run.status === "running" ? <Button size="sm" variant="danger" icon="x" onClick={() => onStopRun(run)}>Stop</Button> : null}
               </div>
             </div>
@@ -1223,7 +1889,7 @@ function GlobalFindingsView(props: {
       </Card>
       {props.findings.length ? (
         <Card>
-          <FindingTable rows={props.findings} global onOpenProject={props.onOpenProject} onOpenReport={props.onOpenReport} onTracking={props.onTracking} />
+          <FindingTable rows={props.findings} paginationKey={`${props.status}:${props.tracking}`} global onOpenProject={props.onOpenProject} onOpenReport={props.onOpenReport} onTracking={props.onTracking} />
         </Card>
       ) : (
         <EmptyInline>No findings yet. Suspected and confirmed issues appear here after a project runs.</EmptyInline>
@@ -1254,47 +1920,71 @@ function FindingList({ findings, compact, empty, onOpenReport }: { findings: Fin
   );
 }
 
-function FindingTable({ rows, global, empty, onOpenProject, onOpenReport, onTracking }: { rows: FindingRow[]; global?: boolean; empty?: string; onOpenProject?: (uuid: string) => void; onOpenReport: (finding: FindingRow) => void; onTracking: (finding: FindingRow, status: string) => void }) {
+function FindingTable({ rows, global, empty, paginationKey, onOpenProject, onOpenReport, onTracking }: { rows: FindingRow[]; global?: boolean; empty?: string; paginationKey?: string; onOpenProject?: (uuid: string) => void; onOpenReport: (finding: FindingRow) => void; onTracking: (finding: FindingRow, status: string) => void }) {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pageRows = rows.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [paginationKey]);
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
   if (!rows.length) return <EmptyInline>{empty ?? "No findings in this view."}</EmptyInline>;
   return (
-    <div className="table-scroll">
-      <table className="data-table">
-        <thead>
-          <tr>
-            {global ? <th>Project</th> : null}
-            <th>Status</th>
-            <th>Title</th>
-            <th>Location</th>
-            <th>Next action</th>
-            <th>Tracking</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((finding) => (
-            <tr key={finding.id}>
-              {global ? (
-                <td className="project-cell">
-                  {finding.project_uuid ? (
-                    <button type="button" className="table-link" onClick={() => onOpenProject?.(finding.project_uuid!)}>{finding.project_name}</button>
-                  ) : finding.project_name}
-                </td>
-              ) : null}
-              <td><StatusBadge status={finding.status} /></td>
-              <td className="title-cell">{finding.title}</td>
-              <td><code>{finding.location}</code></td>
-              <td>{nextAction(finding)}</td>
-              <td>
-                <select value={finding.tracking_status ?? "open"} onChange={(event) => onTracking(finding, event.target.value)} aria-label={`Tracking for ${finding.title ?? "finding"}`}>
-                  {TRACKING.map((status) => <option key={status} value={status}>{status}</option>)}
-                </select>
-              </td>
-              <td><Button size="sm" onClick={() => onOpenReport(finding)}>Report</Button></td>
+    <>
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead>
+            <tr>
+              {global ? <th>Project</th> : null}
+              <th>Status</th>
+              <th>Title</th>
+              <th>Location</th>
+              <th>Next action</th>
+              <th>Tracking</th>
+              <th />
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {pageRows.map((finding) => (
+              <tr key={finding.id}>
+                {global ? (
+                  <td className="project-cell">
+                    {finding.project_uuid ? (
+                      <button type="button" className="table-link" onClick={() => onOpenProject?.(finding.project_uuid!)}>{finding.project_name}</button>
+                    ) : finding.project_name}
+                  </td>
+                ) : null}
+                <td><StatusBadge status={finding.status} /></td>
+                <td className="title-cell">{finding.title}</td>
+                <td><code>{finding.location}</code></td>
+                <td>{nextAction(finding)}</td>
+                <td>
+                  <select value={finding.tracking_status ?? "open"} onChange={(event) => onTracking(finding, event.target.value)} aria-label={`Tracking for ${finding.title ?? "finding"}`}>
+                    {TRACKING.map((status) => <option key={status} value={status}>{status}</option>)}
+                  </select>
+                </td>
+                <td><Button size="sm" onClick={() => onOpenReport(finding)}>Report</Button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationControls
+        total={rows.length}
+        page={safePage}
+        pageSize={pageSize}
+        label="finding"
+        onPage={setPage}
+        onPageSize={setPageSize}
+      />
+    </>
   );
 }
 
@@ -1341,7 +2031,7 @@ function ProvidersPane({ providers, onRefresh }: { providers: ProviderProfile[];
       </div>
       <div className="info-panel">
         <strong>Authentication lives on each daemon.</strong>
-        <span>Run <code>flounder daemon provider login &lt;provider&gt;</code> on every executor machine, or start <code>flounder daemon</code> with that provider's required environment variables. The server stores provider/model choices only, never API keys.</span>
+        <span>Run <code>flounder daemon provider login &lt;provider&gt;</code> on every executor machine, or start <code>flounder daemon start</code> with that provider's required environment variables. The server stores provider/model choices only, never API keys.</span>
         <code>flounder daemon provider check openai-codex</code>
       </div>
       {error ? <div className="inline-error">{error}</div> : null}
@@ -1488,7 +2178,7 @@ function DaemonsPane({ daemons, onRefresh }: { daemons: DaemonRow[]; onRefresh: 
       setError(String(err instanceof Error ? err.message : err));
     }
   }
-  const daemonCommand = created ? `flounder daemon --server ${window.location.origin} --token ${created.token} --workspace ./workspace` : "";
+  const daemonCommand = created ? `flounder daemon start --server ${window.location.origin} --token ${created.token}` : "";
   return (
     <Card>
       <div className="pane-head">
@@ -1501,9 +2191,9 @@ function DaemonsPane({ daemons, onRefresh }: { daemons: DaemonRow[]; onRefresh: 
       <div className="info-panel">
         <strong>Local executor setup</strong>
         <span>Click <strong>New Daemon</strong> to mint a token, then run the printed command in another terminal. Before starting work, authenticate the selected providers on that daemon machine with <code>flounder daemon provider login &lt;provider&gt;</code> or provider-specific environment variables.</span>
-        <code>flounder daemon --server {window.location.origin} --token &lt;token&gt; --workspace ./workspace</code>
+        <code>flounder daemon start --server {window.location.origin} --token &lt;token&gt;</code>
         <code>flounder daemon provider check openai-codex</code>
-        <span>Project paths are resolved under the daemon workspace. Put or sync target repos there; the server only queues jobs and stores status.</span>
+        <span>Project paths resolve under the daemon workspace. The default is ~/.flounder/workspace; pass --workspace to use another root.</span>
       </div>
       {error ? <div className="inline-error">{error}</div> : null}
       {creating ? (
@@ -1938,33 +2628,149 @@ function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onErro
   );
 }
 
-function RunModal({ detail, busy, onClose, onLaunch }: { detail: ProjectDetail; busy: boolean; onClose: () => void; onLaunch: (verb: "run" | "map" | "audit" | "confirm") => void }) {
+function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError }: { detail: ProjectDetail; busy: boolean; onClose: () => void; onLaunch: (action: LaunchAction) => void; onUpdateRunTarget: (run: RunRow, target: number) => void; onError: (message: string) => void }) {
   const running = detail.runs.find((run) => run.status === "running");
   const pendingScopes = detail.progress.pending ?? 0;
   const confirmable = pendingConfirmFindings(detail.allFindings).length;
+  const verifiable = pendingVerifyFindings(detail.allFindings).length;
   const locked = busy || Boolean(running);
-  const options: Array<{ verb: "run" | "map" | "audit" | "confirm"; label: string; detail: string; disabled?: boolean }> = [
+  const [runTargetDraft, setRunTargetDraft] = useState("");
+  useEffect(() => {
+    if (!running) return;
+    setRunTargetDraft(String(running.run_scopes_target ?? 30));
+  }, [running?.id, running?.run_scopes_target]);
+  const submitRunTarget = (event: FormEvent) => {
+    event.preventDefault();
+    if (!running) return;
+    const target = Number(runTargetDraft);
+    if (!Number.isFinite(target) || target < 1) {
+      onError("Enter a positive batch target for the active run.");
+      return;
+    }
+    onUpdateRunTarget(running, Math.floor(target));
+  };
+  const options: Array<{ verb: LaunchAction; label: string; detail: string; disabled?: boolean }> = [
     { verb: "run", label: "Continue audit", detail: "Prepare if needed, map scopes if needed, then dig the next batch.", disabled: locked },
     { verb: "map", label: "Map scopes only", detail: "Build or refresh the scope inventory without digging.", disabled: locked },
     { verb: "audit", label: "Dig pending scopes", detail: pendingScopes ? `Deep-audit the next pending batch from ${plural(pendingScopes, "mapped scope")}.` : "Disabled until Map scopes creates pending scope inventory.", disabled: locked || pendingScopes === 0 },
-    { verb: "confirm", label: "Confirm findings", detail: confirmable ? `Reproduce ${plural(confirmable, "audit-confirmed finding")} against the real target.` : "Disabled until dig produces an audit-confirmed finding.", disabled: locked || confirmable === 0 },
+    { verb: "verify", label: verifyButtonLabel(verifiable), detail: verifiable ? `Confirm-or-refute ${plural(verifiable, "candidate")} by local execution.` : "Disabled until synthesis or dig leaves suspected candidates.", disabled: locked || verifiable === 0 },
+    { verb: "confirm", label: "Confirm", detail: confirmable ? `Reproduce ${plural(confirmable, "execution-confirmed finding")} against the real target.` : "Disabled until local execution confirms a finding.", disabled: locked || confirmable === 0 },
   ];
   return (
-    <Modal title={`Run audit - ${detail.project.name}`} onClose={onClose}>
+    <Modal title={`${running ? "Run settings" : "Run audit"} - ${detail.project.name}`} onClose={onClose}>
       {running ? (
-        <div className="info-panel run-notice compact">
-          <strong>{runKindLabel(running.kind)} is already running.</strong>
-          <span>Stop it or wait for it to finish before starting another run.</span>
+        <div className="info-panel active-run-settings compact">
+          <div>
+            <strong>{runKindLabel(running.kind, running)} is running</strong>
+            <span>{runProgress(running, detail.confirmDecisions)}</span>
+          </div>
+          {(running.kind === "run" || running.kind === "audit") && running.run_scopes_target != null ? (
+            <form className="run-target-control" onSubmit={submitRunTarget}>
+              <label>
+                <span>Batch target</span>
+                <input type="number" min="1" value={runTargetDraft} onChange={(event) => setRunTargetDraft(event.target.value)} />
+              </label>
+              <Button size="sm" icon="sync">Update</Button>
+            </form>
+          ) : null}
+        </div>
+      ) : (
+        <div className="run-options">
+          {options.map((option) => (
+            <button
+              key={option.verb}
+              disabled={option.disabled}
+              title={option.detail}
+              aria-label={`${option.label}. ${option.detail}`}
+              onClick={() => onLaunch(option.verb)}
+            >
+              <strong>{option.label}</strong>
+            </button>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function StopRunConfirmModal({ run, busy, onCancel, onConfirm }: { run: RunRow; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const label = runKindLabel(run.kind, run);
+  return (
+    <Modal
+      title="Stop run?"
+      onClose={onCancel}
+      footer={(
+        <>
+          <Button onClick={onCancel} disabled={busy}>Cancel</Button>
+          <Button variant="danger" icon="x" onClick={onConfirm} disabled={busy}>Stop run</Button>
+        </>
+      )}
+    >
+      <div className="confirm-copy">
+        <strong>{label} run #{run.id} is active.</strong>
+        <p>Progress already recorded will be kept, but the active daemon job will be interrupted. New audit work can be launched after the stop request completes.</p>
+      </div>
+    </Modal>
+  );
+}
+
+function RunLogModal({ run, onClose }: { run: RunRow; onClose: () => void }) {
+  const [events, setEvents] = useState<ActivityRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    let firstLoad = true;
+    const load = async () => {
+      if (firstLoad) {
+        setLoading(true);
+        setError("");
+      }
+      try {
+        const res = await api.runLog(run.id, 120);
+        if (!cancelled) setEvents(res.events ?? []);
+      } catch (err: unknown) {
+        if (!cancelled) setError(String(err instanceof Error ? err.message : err));
+      } finally {
+        if (!cancelled && firstLoad) setLoading(false);
+        firstLoad = false;
+      }
+    };
+    void load();
+    const interval = run.status === "running" ? window.setInterval(() => void load(), 4_000) : undefined;
+    return () => {
+      cancelled = true;
+      if (interval) window.clearInterval(interval);
+    };
+  }, [run.id, run.status]);
+  const lines = useMemo(() => events.reduce((current, event) => appendActivityLine(current, event), [] as ActivityLine[]), [events]);
+  const lastLine = lines[lines.length - 1];
+  const logScroll = usePinnedScroll(lines, run.id);
+  return (
+    <Modal title={`Run log - #${run.id}`} wide onClose={onClose}>
+      <div className="run-log-head">
+        <StateBadge status={run.status} />
+        <strong>{runKindLabel(run.kind, run)}</strong>
+        <span>{runProgress(run, [])}</span>
+        {lastLine ? <span>Last activity {formatActivityTime(lastLine.time)}</span> : null}
+      </div>
+      {error ? <div className="inline-error">{error}</div> : null}
+      {loading ? <EmptyInline>Loading run log...</EmptyInline> : null}
+      {!loading && !lines.length && !error ? <EmptyInline>No activity has been recorded for this run.</EmptyInline> : null}
+      {lines.length ? (
+        <div className="activity-scroll-wrap">
+          <div className="run-log-list" ref={logScroll.scrollRef} onScroll={logScroll.onScroll}>
+            {lines.map((line) => (
+              <div className={`run-log-entry ${line.label.toLowerCase().includes("error") ? "error" : ""}`} key={line.id}>
+                <span className="run-log-time">{formatActivityTime(line.time)}</span>
+                <span className="run-log-kind">{line.meta ? `${line.label} · ${line.meta}` : line.step ? `${line.label} · step ${line.step}` : line.label}</span>
+                <ActivityBody line={line} pre />
+              </div>
+            ))}
+          </div>
+          {!logScroll.isPinned ? <button className="latest-button" type="button" onClick={logScroll.scrollToBottom}>Latest</button> : null}
         </div>
       ) : null}
-      <div className="run-options">
-        {options.map((option) => (
-          <button key={option.verb} disabled={option.disabled} onClick={() => onLaunch(option.verb)}>
-            <strong>{option.label}</strong>
-            <span>{option.detail}</span>
-          </button>
-        ))}
-      </div>
     </Modal>
   );
 }
@@ -2023,10 +2829,15 @@ function CommandPalette({ projects, currentProjectUuid, onClose, onNewProject, o
 }
 
 function ToastView({ toast, onClose }: { toast: Toast; onClose: () => void }) {
+  useEffect(() => {
+    const duration = toast.tone === "success" ? 3000 : toast.tone === "warning" ? 5000 : 8000;
+    const timeout = window.setTimeout(onClose, duration);
+    return () => window.clearTimeout(timeout);
+  }, [toast.message, toast.tone, onClose]);
   return (
     <div className={`toast ${toast.tone}`} role="status">
       <span>{toast.message}</span>
-      <button onClick={onClose}>Close</button>
+      <button onClick={onClose} aria-label="Dismiss notification"><Icon name="x" size={14} /></button>
     </div>
   );
 }

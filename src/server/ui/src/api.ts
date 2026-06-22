@@ -126,6 +126,51 @@ export interface ProjectDetail {
   confirmDecisions: ConfirmDecision[];
   scopes?: ScopeRow[];
   allFindings?: FindingRow[];
+  prepareSummary?: PrepareSummary | null;
+}
+
+export interface PrepareComponentSummary {
+  role?: string;
+  identity?: string;
+  platform?: string;
+  revision?: string;
+  source?: string;
+  stagedPath?: string;
+  inScope?: boolean;
+  match?: string;
+  matchEvidence?: string;
+  deployed?: boolean;
+}
+
+export interface PrepareWorkspaceSummary {
+  exists?: boolean;
+  files?: number;
+  fileLimit?: number;
+  filesTruncated?: boolean;
+  gitDirs?: number;
+  sampleFiles?: string[];
+}
+
+export interface PrepareSummary {
+  runId?: number;
+  status?: string;
+  manifestStatus?: "present" | "missing" | "invalid" | string;
+  manifestState?: string;
+  manifestArtifact?: string;
+  clue?: string;
+  posture?: string;
+  scopeDeclaration?: string;
+  answerFirewall?: string;
+  componentsTotal?: number;
+  components?: PrepareComponentSummary[];
+  inScope?: number;
+  matched?: number;
+  unverified?: number;
+  sourcePinned?: number;
+  gaps?: string[];
+  offscope?: string[];
+  issues?: string[];
+  workspace?: PrepareWorkspaceSummary;
 }
 
 export interface ProviderProfile {
@@ -149,6 +194,7 @@ export interface DaemonRow {
   name?: string | null;
   capabilities?: unknown;
   workspace?: string | null;
+  online?: boolean;
   last_seen_at?: string | null;
 }
 
@@ -203,6 +249,7 @@ export interface LaunchPayload {
   mockLlm?: boolean;
   remap?: boolean;
   findingId?: number;
+  verifyFindings?: unknown;
 }
 
 export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -230,8 +277,10 @@ export const api = {
   updateProject: (uuid: string, body: ProjectPayload) => patchJson<{ ok: true }>(`/api/projects/${encodeURIComponent(uuid)}`, body),
   deleteProject: (uuid: string) => fetchJson<{ ok: true }>(`/api/projects/${encodeURIComponent(uuid)}`, { method: "DELETE" }),
   launchRun: (uuid: string, body: LaunchPayload) => postJson<unknown>(`/api/projects/${encodeURIComponent(uuid)}/runs`, body),
+  updateRun: (id: number, body: { runScopesTarget?: number }) => patchJson<unknown>(`/api/runs/${id}`, body),
   stopRun: (id: number) => postJson<unknown>(`/api/runs/${id}/stop`, {}),
   deleteRun: (id: number) => fetchJson<unknown>(`/api/runs/${id}`, { method: "DELETE" }),
+  runLog: (id: number, tail = 80) => fetchJson<{ events: ActivityRecord[] }>(`/api/runs/${id}/log?tail=${tail}&format=json`),
   patchScope: (uuid: string, scopeId: string, body: unknown) =>
     patchJson<unknown>(`/api/projects/${encodeURIComponent(uuid)}/scopes/${encodeURIComponent(scopeId)}`, body),
   providers: () => fetchJson<{ providers: ProviderProfile[] }>("/api/providers"),

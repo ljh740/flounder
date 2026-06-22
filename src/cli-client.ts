@@ -89,7 +89,7 @@ export async function launchViaApi(server: string, spec: LaunchSpec): Promise<Re
   console.log(`[queued] job #${jobId} (${spec.verb}) on "${spec.target}" · ${daemons} daemon(s) connected`);
   if (daemons === 0) {
     console.log(`[warning] no executor daemon is connected — the job stays queued until one connects.`);
-    console.log(`          start one co-located:  flounder ui    (or a remote: flounder daemon --server ${server} --token <token>)`);
+    console.log(`          start one co-located:  flounder ui    (or a remote: flounder daemon start --server ${server} --token <token>)`);
   }
 
   const runId = await waitForRun(server, jobId);

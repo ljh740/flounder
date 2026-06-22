@@ -5,14 +5,14 @@
 // the daemon (src/server/daemon.ts); this module holds no run state.
 
 import path from "node:path";
-import { defaultConfig, THINKING_LEVELS, type AuditorConfig } from "../config.js";
+import { defaultConfig, defaultOutputDir, THINKING_LEVELS, type AuditorConfig } from "../config.js";
 import type { RunKind, ProviderRoles } from "../db/store.js";
 import type { SandboxBackend, SandboxNetworkMode } from "../security/sandbox.js";
 
-const DEFAULT_OUT = "runs";
+const DEFAULT_OUT = defaultOutputDir();
 const THINKING = new Set<string>(THINKING_LEVELS);
 
-export type Activity = { kind: string; delta?: string; tool?: string; step?: number };
+export type Activity = { kind: string; delta?: string; tool?: string; step?: number; ts?: string };
 
 // In-memory per-run feed of the model's streaming activity (token-level thinking/output +
 // tool calls), for live UI streaming without per-token disk writes. Keeps a recent ring
@@ -21,11 +21,12 @@ export class ActivityBus {
   private readonly buffer: Activity[] = [];
   private readonly listeners = new Set<(ev: Activity) => void>();
   push(ev: Activity): void {
-    this.buffer.push(ev);
+    const item = ev.ts ? ev : { ...ev, ts: new Date().toISOString() };
+    this.buffer.push(item);
     if (this.buffer.length > 2000) this.buffer.shift();
     for (const listener of this.listeners) {
       try {
-        listener(ev);
+        listener(item);
       } catch {
         // a broken listener must not stop the run
       }
@@ -35,6 +36,10 @@ export class ActivityBus {
     for (const ev of this.buffer) fn(ev); // replay backlog
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+  snapshot(limit = 200): Activity[] {
+    const n = Math.max(0, Math.min(Math.floor(limit), this.buffer.length));
+    return this.buffer.slice(this.buffer.length - n);
   }
 }
 
