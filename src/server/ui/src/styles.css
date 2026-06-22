@@ -574,7 +574,8 @@ small {
 }
 
 .phase.running,
-.phase.pending {
+.phase.pending,
+.phase.partial {
   background: color-mix(in srgb, var(--accent) 7%, var(--canvas));
   box-shadow: inset 0 -2px 0 var(--accent);
 }
@@ -611,7 +612,8 @@ small {
 }
 
 .phase.running .phase-marker,
-.phase.pending .phase-marker {
+.phase.pending .phase-marker,
+.phase.partial .phase-marker {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
   background: var(--canvas);
@@ -653,7 +655,8 @@ small {
   background: color-mix(in srgb, var(--success) 13%, transparent);
 }
 
-.phase-state.pending {
+.phase-state.pending,
+.phase-state.partial {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 13%, transparent);
 }

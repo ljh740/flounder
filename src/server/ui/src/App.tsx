@@ -302,6 +302,7 @@ function phaseStatusLabel(status: string): string {
   return {
     running: "Running",
     done: "Done",
+    partial: "Partial",
     pending: "Pending",
     ready: "Ready",
     none: "Not started",

@@ -128,6 +128,9 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const prep = latest("prepare");
   const repro = confirmedDecisions(detail.confirmDecisions).length;
   const conf = latest("confirm");
+  const pendingConfirm = (detail.allFindings ?? []).filter((finding) => {
+    return (finding.status === "confirmed-executable" || finding.status === "confirmed-differential") && !finding.confirm_status;
+  }).length;
   const audit = runs.find((r) => r.status === "running" && ["run", "audit", "map"].includes(r.kind));
   const auditLatest = latest("run", "audit", "map");
   const digStarted = Boolean(audit && audit.run_scopes_target != null);
@@ -163,7 +166,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
     prepare: { status: prep ? prep.status : "none", stat: prep ? (prep.status === "done" ? "Source staged" : prep.status === "running" ? "Preparing source" : prep.status) : "Not started", dur: runDur(prep, prep?.status === "running") },
     map: { status: mapRunning ? "running" : progress.total > 0 ? "done" : "none", stat: progress.total > 0 ? `${progress.total} scopes mapped` : mapRunning ? "Mapping scopes" : "Not started", dur: mapDur },
     dig: {
-      status: digRunning ? "running" : progress.audited > 0 ? "done" : progress.total > 0 ? "pending" : "none",
+      status: digRunning ? "running" : progress.audited > 0 ? (progress.pending > 0 ? "partial" : "done") : progress.total > 0 ? "pending" : "none",
       stat: isVerify
         ? verifyStat
         : finalizingAudit
@@ -174,8 +177,18 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
       dur: digDur,
     },
     confirm: {
-      status: conf ? conf.status : detail.confirmDecisions.length ? "done" : "none",
-      stat: detail.confirmDecisions.length ? `${repro}/${detail.confirmDecisions.length} reproduced` : "Not started",
+      status: conf?.status === "running"
+        ? "running"
+        : detail.confirmDecisions.length
+          ? (repro === detail.confirmDecisions.length && pendingConfirm === 0 ? "done" : "partial")
+          : pendingConfirm > 0
+            ? "pending"
+            : "none",
+      stat: detail.confirmDecisions.length
+        ? `${repro}/${detail.confirmDecisions.length} reproduced${pendingConfirm ? ` · ${pendingConfirm} waiting` : ""}`
+        : pendingConfirm > 0
+          ? `${pendingConfirm} waiting for real-target confirmation`
+          : "Not started",
       dur: runDur(conf, conf?.status === "running"),
     },
   };
