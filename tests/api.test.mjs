@@ -941,6 +941,37 @@ test("api: run rows include job error summaries", async () => {
   });
 });
 
+test("api: successful run rows suppress late job errors", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "run-late-job-error", sourcePaths: ["./src"] }));
+    const runDir = await mkdtemp(path.join(out, "run-late-job-error-"));
+    let runId;
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const jobId = store.enqueueJob("run-late-job-error", { verb: "audit" });
+      runId = store.startRun({ projectId: created.id, kind: "audit", runDir });
+      store.setJobRun(jobId, runId);
+      store.finishRun(runId, "done");
+      store.setJobStatus(jobId, "error", "post-run history sync failed");
+    } finally {
+      store.close();
+    }
+
+    const list = await json(await fetch(base + `/api/projects/${created.uuid}/runs`));
+    assert.equal(list.runs[0].status, "done");
+    assert.equal(list.runs[0].job_status, "error");
+    assert.equal(list.runs[0].job_error, undefined);
+
+    const single = await json(await fetch(base + `/api/runs/${runId}`));
+    assert.equal(single.run.status, "done");
+    assert.equal(single.run.job_status, "error");
+    assert.equal(single.run.job_error, undefined);
+  });
+});
+
 test("api: run scope target adjustment only applies to running runs", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

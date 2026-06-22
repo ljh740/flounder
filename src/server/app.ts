@@ -695,11 +695,13 @@ function runApiRow(store: MetadataStore, run: Record<string, unknown>): Record<s
   const runId = Number(run.id);
   const job = Number.isFinite(runId) ? store.getJobByRun(runId) : undefined;
   if (!job) return run;
+  const runStatus = typeof run.status === "string" ? run.status : "";
+  const jobError = runStatus === "done" ? undefined : stringValue(job.error) || undefined;
   return {
     ...run,
     job_id: job.id,
     job_status: job.status,
-    job_error: stringValue(job.error) || undefined,
+    job_error: jobError,
   };
 }
 
