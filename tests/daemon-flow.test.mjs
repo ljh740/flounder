@@ -250,6 +250,8 @@ test("daemon: active job counts connected daemon identities, not stream connecti
       const row = active.active.find((item) => item.jobId === jobId);
       assert.ok(row);
       assert.equal(row.onlineDaemons, 1);
+      assert.equal(Array.isArray(active.daemons?.[0]?.capabilities?.providers), false);
+      assert.equal(typeof active.daemons?.[0]?.capabilities?.providerCount, "number");
     } finally {
       first.abort();
       second.abort();

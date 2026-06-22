@@ -406,7 +406,7 @@ const ROUTES: Route[] = [
     handler: runLog,
   }),
 
-  route({ method: "GET", path: "/api/active", summary: "In-flight jobs (queued/dispatched/running) across all daemons.", handler: (c) => sendJson(c.res, 200, { active: activeRuns(c.store, c.plane), daemons: daemonRows(c) }) }),
+  route({ method: "GET", path: "/api/active", summary: "In-flight jobs (queued/dispatched/running) across all daemons.", handler: (c) => sendJson(c.res, 200, { active: activeRuns(c.store, c.plane), daemons: daemonStatusRows(c) }) }),
   route({ method: "GET", path: "/api/stream", summary: "Server-sent events: the project snapshot + active list, pushed ~1/s for live updates.", handler: (c) => streamSnapshots(c.res, c.store, c.plane) }),
 
   // ---- execution plane: daemon ↔ server (hidden from the agent catalog) ----------------
@@ -1912,6 +1912,24 @@ function daemonRows(c: Ctx): Array<Record<string, unknown>> {
     const online = c.plane.hasDaemon(Number(daemon.id));
     if (includeRaw) return { ...daemon, online, capabilities: parsed ?? daemon.capabilities ?? null };
     return { ...daemon, online, capabilities: summarizeDaemonCapabilities(parsed) };
+  });
+}
+
+function daemonStatusRows(c: Ctx): Array<Record<string, unknown>> {
+  return c.store.listDaemons().map((daemon) => {
+    const summary = summarizeDaemonCapabilities(safeParse(daemon.capabilities));
+    return {
+      id: daemon.id,
+      name: daemon.name,
+      workspace: daemon.workspace,
+      last_seen_at: daemon.last_seen_at,
+      created_at: daemon.created_at,
+      online: c.plane.hasDaemon(Number(daemon.id)),
+      capabilities: {
+        providerCount: summary.providerCount,
+        configuredProviderCount: summary.configuredProviderCount,
+      },
+    };
   });
 }
 
