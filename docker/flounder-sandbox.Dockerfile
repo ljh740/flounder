@@ -29,4 +29,14 @@ RUN apt-get update \
     sed \
   && rm -rf /var/lib/apt/lists/*
 
+ARG FOUNDRY_VERSION=stable
+ENV FOUNDRY_DIR=/root/.foundry
+ENV PATH="${FOUNDRY_DIR}/bin:${PATH}"
+
+RUN curl -L https://foundry.paradigm.xyz | bash \
+  && if [ "$FOUNDRY_VERSION" = "stable" ]; then foundryup; else foundryup --install "$FOUNDRY_VERSION"; fi \
+  && forge --version \
+  && cast --version \
+  && anvil --version
+
 WORKDIR /workspace
