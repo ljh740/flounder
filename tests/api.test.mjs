@@ -859,6 +859,64 @@ test("api: verified duplicates hide older suspected candidates at the same scope
   });
 });
 
+test("api: strongly related suspected duplicates hide behind confirmed findings", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "finding-related-dedupe", sourcePaths: ["./src"] }));
+    const runDir = await mkdtemp(path.join(out, "finding-related-dedupe-run-"));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir });
+      store.upsertFindings(created.id, runId, [
+        {
+          findingKey: "confirmed-bytecode-length",
+          title: "Contract class id does not bind the exact public bytecode length",
+          location: "noir/contracts/protocol/contract_class_registry/src/main.nr:54",
+          severity: "high",
+          status: "confirmed-executable",
+          scopeId: "CLASS-REGISTRY",
+          confidence: 0.95,
+        },
+        {
+          findingKey: "suspected-bytecode-length",
+          title: "Public bytecode class IDs do not bind the exact byte length",
+          location: "yarn-project/protocol-contracts/src/class-registry/contract_class_published_event.ts:49",
+          severity: "medium",
+          status: "suspected",
+          scopeId: "EVENT-PARSER",
+          confidence: 0.78,
+        },
+        {
+          findingKey: "distinct-bytecode",
+          title: "Public bytecode parser accepts malformed function selectors",
+          location: "yarn-project/protocol-contracts/src/class-registry/contract_class_published_event.ts:92",
+          severity: "medium",
+          status: "suspected",
+          scopeId: "EVENT-PARSER",
+          confidence: 0.8,
+        },
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const projectPath = "/api/projects/" + created.uuid;
+    const detail = await json(await fetch(base + projectPath));
+    assert.equal(detail.findingsTotal, 2);
+    assert.deepEqual(detail.allFindings.map((finding) => finding.finding_key).sort(), ["confirmed-bytecode-length", "distinct-bytecode"].sort());
+    assert.deepEqual(detail.statusCounts, { "confirmed-executable": 1, suspected: 1 });
+
+    const findings = await json(await fetch(base + projectPath + "/findings"));
+    assert.equal(findings.total, 2);
+    assert.deepEqual(findings.findings.map((finding) => finding.finding_key).sort(), ["confirmed-bytecode-length", "distinct-bytecode"].sort());
+
+    const bugs = await json(await fetch(base + "/api/bugs"));
+    assert.equal(bugs.stats.total, 2);
+    assert.deepEqual(bugs.findings.map((finding) => finding.finding_key).sort(), ["confirmed-bytecode-length", "distinct-bytecode"].sort());
+  });
+});
+
 test("api: user-facing finding titles do not expose model status prefixes", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

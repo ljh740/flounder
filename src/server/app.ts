@@ -1380,9 +1380,10 @@ function likelyVerifiedDuplicate(row: Record<string, unknown>, confirmed: Record
   if (normalizeDedupePart(row.project_id ?? row.project_uuid ?? "") !== normalizeDedupePart(confirmed.project_id ?? confirmed.project_uuid ?? "")) return false;
   const scope = normalizeDedupePart(row.scope_id ?? "");
   const location = normalizeDedupePart(row.location ?? "");
-  if (!scope || scope !== normalizeDedupePart(confirmed.scope_id ?? "")) return false;
-  if (!location || location !== normalizeDedupePart(confirmed.location ?? "")) return false;
-  return relatedFindingTitles(row.title, confirmed.title);
+  if (scope && scope === normalizeDedupePart(confirmed.scope_id ?? "") && location && location === normalizeDedupePart(confirmed.location ?? "")) {
+    return relatedFindingTitles(row.title, confirmed.title);
+  }
+  return stronglyRelatedFindingTitles(row.title, confirmed.title);
 }
 
 function relatedFindingTitles(a: unknown, b: unknown): boolean {
@@ -1392,6 +1393,17 @@ function relatedFindingTitles(a: unknown, b: unknown): boolean {
   let overlap = 0;
   for (const token of aTokens) if (bTokens.has(token)) overlap += 1;
   return overlap >= Math.min(3, Math.min(aTokens.size, bTokens.size));
+}
+
+function stronglyRelatedFindingTitles(a: unknown, b: unknown): boolean {
+  const aTokens = findingTitleTokens(a);
+  const bTokens = findingTitleTokens(b);
+  if (aTokens.size < 5 || bTokens.size < 5) return false;
+  let overlap = 0;
+  for (const token of aTokens) if (bTokens.has(token)) overlap += 1;
+  const smaller = Math.min(aTokens.size, bTokens.size);
+  const larger = Math.max(aTokens.size, bTokens.size);
+  return overlap >= 5 && overlap / smaller >= 0.7 && overlap / larger >= 0.5;
 }
 
 const FINDING_TITLE_STOPWORDS = new Set(["a", "an", "and", "are", "at", "be", "by", "can", "for", "from", "in", "is", "it", "of", "on", "or", "the", "to", "with"]);
