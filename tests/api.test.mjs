@@ -389,6 +389,46 @@ test("api: unresolved prepare manifest status is surfaced as a review issue", as
   });
 });
 
+test("api: blind prepare manifests get a clean answer-firewall fallback", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "blind-prepare-firewall" }));
+    const runDir = path.join(out, "blind-prepare-firewall-run");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(path.join(workspace, "source"), { recursive: true });
+    await writeFile(path.join(workspace, "source", "README.md"), "official source snapshot\n");
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "partial",
+        posture: "blind",
+        components: [
+          {
+            id: "source",
+            staged_path: "source",
+            origin: { url: "https://example.invalid/repo.git", tag: "v1.0.0" },
+            in_scope: true,
+            deployment_match: { status: "n/a" },
+          },
+        ],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + "/api/projects/" + created.uuid));
+    assert.equal(detail.prepareSummary.answerFirewall, "clean · blind posture");
+    assert.deepEqual(detail.prepareSummary.issues, []);
+  });
+});
+
 test("api: prepared workspace file count reports scan truncation", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

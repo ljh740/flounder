@@ -824,7 +824,8 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
     issues.push("prepare run ended before all material gaps were closed; staged materials are usable but partial");
   }
 
-  const answerFirewall = describeAnswerFirewall(manifest?.answer_firewall);
+  const posture = stringValue(manifest?.posture);
+  const answerFirewall = describeAnswerFirewall(manifest?.answer_firewall, posture);
   if (answerFirewall !== "clean" && answerFirewall !== "not reported" && !answerFirewall.startsWith("clean ")) {
     issues.push(`answer firewall is ${answerFirewall}`);
   }
@@ -836,7 +837,7 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
     manifestState: manifestState || undefined,
     manifestArtifact: manifestPath ? "prepare_manifest.json" : undefined,
     clue: stringValue(manifest?.clue),
-    posture: stringValue(manifest?.posture),
+    posture,
     scopeDeclaration: stringValue(manifest?.scope_declaration),
     answerFirewall,
     componentsTotal: components.length,
@@ -914,7 +915,7 @@ function summarizePreparedWorkspace(workspaceDir: string): Record<string, unknow
   return { exists: true, files, fileLimit, filesTruncated: stack.length > 0, gitDirs, sampleFiles };
 }
 
-function describeAnswerFirewall(value: unknown): string {
+function describeAnswerFirewall(value: unknown, posture = ""): string {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (Array.isArray(value)) {
     if (value.length === 0) return "clean (empty list)";
@@ -931,6 +932,7 @@ function describeAnswerFirewall(value: unknown): string {
     const text = parts.length ? parts.join(" · ") : "reported";
     return isCleanFirewallNote(text) ? `clean · ${text}` : text;
   }
+  if (posture.trim().toLowerCase() === "blind") return "clean · blind posture";
   return "not reported";
 }
 
