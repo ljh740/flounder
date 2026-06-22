@@ -236,6 +236,31 @@ test("read, write, edit, and bash operate on loaded material and the copied work
   }
 });
 
+test("failed bash command events include an output preview for the UI", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.sourcePaths = [fixtures];
+    const logger = await tempLogger(dir);
+    const ctx = { cfg, source: [], corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session: newSession() };
+
+    await tool("write").run({
+      path: "failing_repro.test.mjs",
+      content: "import test from 'node:test';\n\ntest('visible failure', () => { throw new Error('VISIBLE_FAILURE_REASON'); });\n",
+    }, ctx);
+    const run = await tool("bash").run({ cmd: "node --test failing_repro.test.mjs", purpose: "confirm", success_patterns: ["NEVER_SEEN"] }, ctx);
+    assert.match(run.observation, /VISIBLE_FAILURE_REASON/);
+
+    const events = (await readFile(logger.eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const commandEvent = events.find((event) => event.kind === "audit_command_run");
+    assert.equal(commandEvent.exitCode, 1);
+    assert.match(commandEvent.output, /VISIBLE_FAILURE_REASON/);
+    assert.ok(commandEvent.output.length <= 2600, "event output preview should stay bounded");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("read and activity summaries do not expose or resolve host absolute paths", async () => {
   const dir = await tempDir();
   const hostPath = "/opt/private/flounder/SKILL.md";

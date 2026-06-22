@@ -366,6 +366,8 @@ const bashTool: AgentTool = {
       workspace: workspace.relative,
     };
     ctx.session.commandRuns.push(record);
+    const output = commandOutputPreview(result);
+    const includeOutput = result.timedOut || !exitMatched || (isConfirm && !passed);
     await ctx.logger.event("audit_command_run", {
       runId,
       purpose: normalized.purpose,
@@ -375,6 +377,7 @@ const bashTool: AgentTool = {
       timedOut: result.timedOut,
       matched: patternCheck.matched.length,
       missing: patternCheck.missing.length,
+      ...(includeOutput && output ? { output } : {}),
     });
 
     const tail = (text: string): string => (text.length > 1600 ? `...${text.slice(-1600)}` : text);
@@ -403,6 +406,15 @@ function confirmFailureReason(
   if (normalized.successPatterns.length === 0) return "purpose=confirm requires success_patterns describing the invariant break or patched regression";
   if (!exitMatched) return `exit=${result.exitCode} expected=${result.expectedExitCode} timedOut=${result.timedOut}`;
   return `missing success patterns: ${patternCheck.missing.join(" | ")}`;
+}
+
+function commandOutputPreview(result: ReproductionCommandResult): string {
+  const tail = (text: string): string => (text.length > 1200 ? `...${text.slice(-1200)}` : text);
+  const sections = [
+    result.stderr.trim() ? `stderr:\n${tail(result.stderr.trim())}` : "",
+    result.stdout.trim() ? `stdout:\n${tail(result.stdout.trim())}` : "",
+  ].filter(Boolean);
+  return sections.join("\n---\n").slice(0, 2600);
 }
 
 /** Report files the framework reads back from the workspace. */

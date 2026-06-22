@@ -453,7 +453,7 @@ function actionSummary(detail: string): { label: string; body: string } {
 function eventPayload(event: ActivityRecord): Record<string, unknown> {
   const detail = parseJson<Record<string, unknown>>(event.detail, {});
   const payload = { ...detail };
-  for (const key of ["path", "bytes", "produced", "total", "audited", "pending", "deferred", "scopes", "findings", "hypotheses", "confirmedExecutable", "commandRuns", "steps", "stoppedReason", "resumed", "target", "runs", "toolchain", "command", "exitCode", "timedOut", "ok"] as const) {
+  for (const key of ["path", "bytes", "produced", "total", "audited", "pending", "deferred", "scopes", "findings", "hypotheses", "confirmedExecutable", "commandRuns", "steps", "stoppedReason", "resumed", "target", "runs", "toolchain", "command", "runId", "purpose", "passed", "exitCode", "timedOut", "matched", "missing", "output", "ok"] as const) {
     if (event[key] !== undefined) payload[key] = event[key];
   }
   return payload;
@@ -573,9 +573,9 @@ function usePinnedScroll(trigger: unknown, resetKey: unknown) {
   return { scrollRef, onScroll, scrollToBottom, isPinned };
 }
 
-function commandRunSummary(detail: string): string {
+function commandRunSummary(detail: string, payload: Record<string, unknown> = {}): string {
   try {
-    const parsed = JSON.parse(detail) as {
+    const parsed = { ...JSON.parse(detail), ...payload } as {
       runId?: string;
       purpose?: string;
       passed?: boolean;
@@ -583,6 +583,7 @@ function commandRunSummary(detail: string): string {
       timedOut?: boolean;
       missing?: number;
       matched?: number;
+      output?: string;
     };
     const status = parsed.timedOut
       ? "timed out"
@@ -603,7 +604,8 @@ function commandRunSummary(detail: string): string {
       parsed.missing ? `${parsed.missing} missing` : undefined,
       parsed.matched ? `${parsed.matched} matched` : undefined,
     ].filter(Boolean);
-    return pieces.join(" · ");
+    const summary = pieces.join(" · ");
+    return parsed.output ? `${summary}\n${parsed.output}` : summary;
   } catch {
     return detail;
   }
@@ -726,7 +728,7 @@ function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): Activ
     const summary = event.kind === "audit_action" ? undefined : eventSummary(event, body);
     const actionFailed = event.kind === "audit_action" && event.ok === false;
     const normalizedBody = event.kind === "audit_command_run"
-      ? commandRunSummary(body)
+      ? commandRunSummary(body, eventPayload(event))
       : actionFailed
         ? [action?.body ?? body, typeof event.result === "string" ? event.result : undefined].filter(Boolean).join("\n")
         : action?.body ?? summary?.body ?? body;
