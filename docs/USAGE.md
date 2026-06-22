@@ -74,7 +74,19 @@ npm test
 npm run sandbox:build  # required for real audits with the default OCI sandbox
 ```
 
-Start the local product surface:
+Command examples use the installed `flounder` binary. In a fresh source checkout
+before installing or linking the package, replace `flounder` with
+`node dist/cli.js`.
+
+Start the local product surface from a source checkout:
+
+```bash
+node dist/cli.js ui                 # dashboard + control plane at http://127.0.0.1:4500
+node dist/cli.js ui --no-daemon     # control plane only
+node dist/cli.js daemon start --server http://<server>:4500 --token <token>   # remote executor
+```
+
+After installing or linking the package, the same commands are:
 
 ```bash
 flounder ui                 # dashboard + control plane at http://127.0.0.1:4500

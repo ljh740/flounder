@@ -80,8 +80,20 @@ nvm use
 npm install
 npm run build
 npm run sandbox:build
+```
 
+Command examples below use the installed `flounder` binary. In a fresh source
+checkout before installing or linking the package, use `node dist/cli.js` in its
+place:
+
+```bash
 # Start the local control plane and dashboard.
+node dist/cli.js ui
+```
+
+After installing the package globally, the same command is:
+
+```bash
 flounder ui
 
 # On each executor machine, authenticate the providers it will run.

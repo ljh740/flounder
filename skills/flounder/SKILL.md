@@ -85,6 +85,9 @@ confirm the skill is discoverable before installing.
    node dist/cli.js --help
    ```
 
+   Until the package is installed or linked, replace `flounder` in command
+   examples with `node dist/cli.js`.
+
 2. Start or reuse the local control plane:
 
    ```bash
