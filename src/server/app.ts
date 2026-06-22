@@ -1306,7 +1306,12 @@ function dedupeFindingRows(rows: Array<Record<string, unknown>>): Array<Record<s
     const current = best.get(key);
     if (!current || compareFindingRows(row, current) > 0) best.set(key, row);
   }
-  return rows.filter((row) => best.get(findingDisplayDedupeKey(row)) === row);
+  const exactDeduped = rows.filter((row) => best.get(findingDisplayDedupeKey(row)) === row);
+  const confirmed = exactDeduped.filter((row) => isConfirmedFindingStatus(String(row.status ?? "").toLowerCase()));
+  return exactDeduped.filter((row) => {
+    if (isConfirmedFindingStatus(String(row.status ?? "").toLowerCase())) return true;
+    return !confirmed.some((candidate) => likelyVerifiedDuplicate(row, candidate));
+  });
 }
 
 function findingDisplayDedupeKey(row: Record<string, unknown>): string {
@@ -1319,6 +1324,35 @@ function findingDisplayDedupeKey(row: Record<string, unknown>): string {
 
 function normalizeDedupePart(value: unknown): string {
   return String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function likelyVerifiedDuplicate(row: Record<string, unknown>, confirmed: Record<string, unknown>): boolean {
+  if (rank(FINDING_STATUS_RANK, confirmed.status) <= rank(FINDING_STATUS_RANK, row.status)) return false;
+  if (normalizeDedupePart(row.project_id ?? row.project_uuid ?? "") !== normalizeDedupePart(confirmed.project_id ?? confirmed.project_uuid ?? "")) return false;
+  const scope = normalizeDedupePart(row.scope_id ?? "");
+  const location = normalizeDedupePart(row.location ?? "");
+  if (!scope || scope !== normalizeDedupePart(confirmed.scope_id ?? "")) return false;
+  if (!location || location !== normalizeDedupePart(confirmed.location ?? "")) return false;
+  return relatedFindingTitles(row.title, confirmed.title);
+}
+
+function relatedFindingTitles(a: unknown, b: unknown): boolean {
+  const aTokens = findingTitleTokens(a);
+  const bTokens = findingTitleTokens(b);
+  if (aTokens.size === 0 || bTokens.size === 0) return false;
+  let overlap = 0;
+  for (const token of aTokens) if (bTokens.has(token)) overlap += 1;
+  return overlap >= Math.min(3, Math.min(aTokens.size, bTokens.size));
+}
+
+const FINDING_TITLE_STOPWORDS = new Set(["a", "an", "and", "are", "at", "be", "by", "can", "for", "from", "in", "is", "it", "of", "on", "or", "the", "to", "with"]);
+
+function findingTitleTokens(value: unknown): Set<string> {
+  return new Set(
+    normalizeDedupePart(cleanFindingTitle(value))
+      .split(/[^a-z0-9]+/i)
+      .filter((token) => token.length >= 3 && !FINDING_TITLE_STOPWORDS.has(token)),
+  );
 }
 
 function compareFindingRows(a: Record<string, unknown>, b: Record<string, unknown>): number {

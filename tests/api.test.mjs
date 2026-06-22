@@ -643,6 +643,60 @@ test("api: duplicate findings from different scopes collapse to one user-facing 
   });
 });
 
+test("api: verified duplicates hide older suspected candidates at the same scope and location", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "finding-verified-dedupe", sourcePaths: ["./src"] }));
+    const runDir = await mkdtemp(path.join(out, "finding-verified-dedupe-run-"));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir });
+      store.upsertFindings(created.id, runId, [
+        {
+          findingKey: "suspected-normalize",
+          title: "Native verifier silently normalizes non-canonical public input words",
+          location: "src/bbapi_shared.hpp:233",
+          severity: "medium",
+          status: "suspected",
+          scopeId: "BB-PROOF",
+          confidence: 0.82,
+        },
+        {
+          findingKey: "confirmed-normalize",
+          title: "Native verifier accepts non-canonical field words by normalizing uint256_t",
+          location: "src/bbapi_shared.hpp:233",
+          severity: "medium",
+          status: "confirmed-executable",
+          scopeId: "BB-PROOF",
+          confidence: 0.96,
+        },
+        {
+          findingKey: "same-line-distinct",
+          title: "Governance action list stays mutable after approval",
+          location: "src/bbapi_shared.hpp:233",
+          severity: "medium",
+          status: "suspected",
+          scopeId: "BB-PROOF",
+          confidence: 0.75,
+        },
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const projectPath = "/api/projects/" + created.uuid;
+    const detail = await json(await fetch(base + projectPath));
+    assert.equal(detail.findingsTotal, 2);
+    assert.deepEqual(detail.allFindings.map((finding) => finding.finding_key).sort(), ["confirmed-normalize", "same-line-distinct"].sort());
+    assert.deepEqual(detail.statusCounts, { "confirmed-executable": 1, suspected: 1 });
+
+    const findings = await json(await fetch(base + projectPath + "/findings"));
+    assert.equal(findings.total, 2);
+    assert.deepEqual(findings.findings.map((finding) => finding.finding_key).sort(), ["confirmed-normalize", "same-line-distinct"].sort());
+  });
+});
+
 test("api: user-facing finding titles do not expose model status prefixes", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
