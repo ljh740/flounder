@@ -329,6 +329,7 @@ function isAllowedLocalInspectionCommand(program: string, args: string[]): boole
   if (name === "which") return args.length > 0 && args.every(isPlainToolName);
   if (isAllowedVersionInspection(name, args)) return true;
   if (isAllowedJsonToolInspection(name, args)) return true;
+  if (name === "test" || name === "[") return isAllowedFileTestInspection(name, args);
   if (name === "ls") return args.every((arg) => isSafeInspectionArg(name, arg));
   if (name === "find") return args.every((arg) => isSafeInspectionArg(name, arg));
   if (name === "rg" || name === "grep" || name === "jq") return args.every((arg) => isSafeInspectionArg(name, arg));
@@ -386,6 +387,16 @@ function isAllowedJsonToolInspection(program: string, args: string[]): boolean {
   const paths = rest.filter((arg) => !arg.startsWith("-"));
   if (paths.length > 1) return false;
   return rest.every((arg) => isSafeInspectionArg(program, arg));
+}
+
+function isAllowedFileTestInspection(program: string, args: string[]): boolean {
+  const tokens = program === "[" ? args.slice(0, -1) : args;
+  if (program === "[" && args.at(-1) !== "]") return false;
+  if (tokens.length !== 2) return false;
+  const [predicate, target] = tokens;
+  if (!predicate || !target) return false;
+  if (!new Set(["-e", "-f", "-d", "-s", "-r"]).has(predicate)) return false;
+  return isSafeInspectionArg(program, target);
 }
 
 function isPlainToolName(input: string): boolean {

@@ -62,6 +62,22 @@ test("agent bash allows readonly tool discovery, version, and local JSON inspect
   }
 });
 
+test("agent bash allows readonly file-existence inspection tests only", () => {
+  for (const c of [
+    cmd("test", "-f", "specs/zips/zips/zip-0032.rst"),
+    cmd("test", "-d", "source_packages"),
+    cmd("[", "-e", "prepare_manifest.json", "]"),
+  ]) {
+    assert.equal(analyzeAgentBashCommandSafety(c).blocked, false, `${c.program} ${c.args.join(" ")} should be readonly inspection`);
+    assert.equal(isAgentBuildCommand(c), false);
+    assert.equal(isAgentConfirmCommand(c), false);
+  }
+
+  assert.equal(analyzeAgentBashCommandSafety(cmd("test", "a", "=", "b")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("test", "-w", "source_packages")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("[", "-f", "prepare_manifest.json")).blocked, true);
+});
+
 test("agent bash distinguishes RPC-named local files from RPC secret references", () => {
   assert.equal(analyzeAgentBashCommandSafety(cmd("rg", "Inbox", "provenance/mainnet_rpc_state_20260614.json")).blocked, false);
   assert.equal(analyzeAgentBashCommandSafety(cmd("cat", "provenance/MAINNET_RPC_STATE.json")).blocked, false);
