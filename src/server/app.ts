@@ -719,19 +719,26 @@ async function projectGet(c: Ctx): Promise<void> {
     await reconcileStaleAuditingScopes(c, project);
     const allRunsRaw = c.store.listRuns(id);
     const materialBoundary = latestPrepareRun(allRunsRaw);
-    const currentRunsRaw = currentMaterialRuns(allRunsRaw, materialBoundary);
+    const activePrepareRefresh = activePrepareRefreshStartedAt(c.store, project, materialBoundary);
+    const currentRunsRaw = activePrepareRefresh
+      ? allRunsRaw.filter((run) => stringValue(run.started_at) >= activePrepareRefresh)
+      : currentMaterialRuns(allRunsRaw, materialBoundary);
     const currentRunIds = runIdSet(currentRunsRaw);
     const runs = runApiRows(c.store, allRunsRaw.slice(0, 50), c.plane, materialBoundary);
-    const currentScopeRunExists = !materialBoundary || currentRunsRaw.some(isScopeInventoryRun);
+    const currentScopeRunExists = !activePrepareRefresh && (!materialBoundary || currentRunsRaw.some(isScopeInventoryRun));
     const storedProgress = currentScopeRunExists ? c.store.scopeProgress(id) : emptyProgress();
     const storedScopes = currentScopeRunExists ? c.store.queryScopes(id, { limit: 50, offset: 0 }) : [];
     const scopeCheckpoint = latestScopeCheckpoint(currentRunsRaw);
     const scopes = scopeApiRows(storedScopes.length > 0 ? storedScopes : scopeCheckpoint?.scopes ?? storedScopes);
     const progress = storedProgress.total > 0 ? storedProgress : scopeCheckpoint?.progress ?? storedProgress;
-    const allFindings = reportableFindings(c.store.listFindings(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
+    const allFindings = activePrepareRefresh
+      ? []
+      : reportableFindings(c.store.listFindings(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const findingSummaries = allFindings.map(findingSummaryRow);
     const auditConfirmedFindings = countAuditConfirmedFindings(allFindings);
-    const confirmDecisions = c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary));
+    const confirmDecisions = activePrepareRefresh
+      ? []
+      : c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes").length;
     sendJson(c.res, 200, {
       project,
@@ -748,8 +755,8 @@ async function projectGet(c: Ctx): Promise<void> {
       confirmDecisions,
       scopes,
       allFindings: findingSummaries,
-      prepareSummary: latestPrepareSummary(runs),
-      material: materialSummary(allRunsRaw, materialBoundary),
+      prepareSummary: activePrepareRefresh && currentRunsRaw.length === 0 ? null : latestPrepareSummary(runs),
+      material: materialSummary(allRunsRaw, materialBoundary, activePrepareRefresh),
     });
   });
 }
@@ -810,6 +817,20 @@ function currentMaterialRuns(runs: Array<Record<string, unknown>>, boundary?: Re
   return runs.filter((run) => isCurrentMaterialRun(run, boundary));
 }
 
+function activePrepareRefreshStartedAt(store: MetadataStore, project: Record<string, unknown>, boundary?: Record<string, unknown>): string | undefined {
+  const projectName = stringValue(project.name);
+  if (!projectName) return undefined;
+  const boundaryStarted = stringValue(boundary?.started_at);
+  const job = store.runningJobs().find((entry) => {
+    if (stringValue(entry.project) !== projectName) return false;
+    const spec = safeParse(entry.spec_json) as { verb?: unknown } | null;
+    return spec?.verb === "prepare";
+  });
+  const startedAt = stringValue(job?.created_at);
+  if (!startedAt) return undefined;
+  return !boundaryStarted || startedAt >= boundaryStarted ? startedAt : undefined;
+}
+
 function runIdSet(runs: Array<Record<string, unknown>>): Set<number> {
   return new Set(runs.map((run) => Number(run.id)).filter(Number.isFinite));
 }
@@ -837,14 +858,15 @@ function materialStaleness(run: Record<string, unknown>, boundary?: Record<strin
   };
 }
 
-function materialSummary(runs: Array<Record<string, unknown>>, boundary?: Record<string, unknown>): Record<string, unknown> {
-  if (!boundary) return { currentPrepareRunId: null, staleRunCount: 0 };
+function materialSummary(runs: Array<Record<string, unknown>>, boundary?: Record<string, unknown>, activePrepareRefreshStartedAt?: string): Record<string, unknown> {
+  if (!boundary) return { currentPrepareRunId: null, staleRunCount: 0, activePrepareRefreshStartedAt };
   const staleRunCount = runs.filter((run) => !isCurrentMaterialRun(run, boundary)).length;
   return {
     currentPrepareRunId: boundary.id,
     currentPrepareStatus: boundary.status,
     currentPrepareStartedAt: boundary.started_at,
     staleRunCount,
+    ...(activePrepareRefreshStartedAt ? { activePrepareRefreshStartedAt } : {}),
   };
 }
 
@@ -2676,12 +2698,19 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
     const id = Number(project.id);
     const allRuns = store.listRuns(id);
     const materialBoundary = latestPrepareRun(allRuns);
-    const currentRuns = currentMaterialRuns(allRuns, materialBoundary);
+    const activePrepareRefresh = activePrepareRefreshStartedAt(store, project, materialBoundary);
+    const currentRuns = activePrepareRefresh
+      ? allRuns.filter((run) => stringValue(run.started_at) >= activePrepareRefresh)
+      : currentMaterialRuns(allRuns, materialBoundary);
     const currentRunIds = runIdSet(currentRuns);
-    const currentScopeRunExists = !materialBoundary || currentRuns.some(isScopeInventoryRun);
-    const findings = reportableFindings(store.listFindings(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
+    const currentScopeRunExists = !activePrepareRefresh && (!materialBoundary || currentRuns.some(isScopeInventoryRun));
+    const findings = activePrepareRefresh
+      ? []
+      : reportableFindings(store.listFindings(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const counts = findingCounts(findings);
-    const confirmDecisions = store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary));
+    const confirmDecisions = activePrepareRefresh
+      ? []
+      : store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes").length;
     const verifyPendingFindings = (counts.suspected ?? 0) + (counts["confirmed-source"] ?? 0);
     const confirmPendingFindings = findings.filter((finding) => {
@@ -2707,7 +2736,7 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
       confirmDecisionCount: confirmDecisions.length,
       runCount: store.countRuns(id),
       currentRunCount: currentRuns.length,
-      latestRun: runApiRows(store, allRuns.slice(0, 1), undefined, materialBoundary)[0] ?? null,
+      latestRun: runApiRows(store, currentRuns.slice(0, 1), undefined, materialBoundary)[0] ?? null,
       activeRuns: activeByTarget.get(String(project.name)) ?? 0,
     };
   });

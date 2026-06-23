@@ -531,7 +531,7 @@ function runStages(run: RunRow | undefined): RunStages {
 }
 
 function latestRunWithStage(detail: ProjectDetail, stage: keyof RunStages): RunRow | undefined {
-  return detail.runs.find((run) => Boolean(runStages(run)[stage]));
+  return currentMaterialRuns(detail.runs).find((run) => Boolean(runStages(run)[stage]));
 }
 
 interface ActivityLine {
@@ -1773,6 +1773,8 @@ function ProjectDetailView(props: {
             const displayStatus = phaseDisplayStatus(phase);
             const label = phaseLabel(phase);
             const footer = phases[phase].dur || phaseStatusLabel(displayStatus);
+            const stat = phase === "prepare" ? prepareInfo.stat : phases[phase].stat;
+            const detailText = phase === "prepare" ? prepareInfo.detail : PHASE_DESC[phase];
             return (
               <button key={phase} type="button" className={`phase ${displayStatus}`} onClick={() => jumpToPhase(phase)} title={`Open ${label} output`}>
                 <span className="phase-head">
@@ -1785,10 +1787,10 @@ function ProjectDetailView(props: {
                     <Icon name={phaseStatusIcon(displayStatus)} size={12} />
                   </span>
                 </span>
-                <strong>{phase === "prepare" ? prepareInfo.stat : phases[phase].stat}</strong>
+                <strong title={stat}>{stat}</strong>
                 <small className="phase-detail">
-                  <span>{phase === "prepare" ? prepareInfo.detail : PHASE_DESC[phase]}</span>
-                  <span className="phase-time">{footer}</span>
+                  <span title={detailText}>{detailText}</span>
+                  <span className="phase-time" title={footer}>{footer}</span>
                 </small>
               </button>
             );

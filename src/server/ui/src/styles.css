@@ -601,7 +601,7 @@ small {
 .pipeline {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(7, minmax(180px, 1fr));
+  grid-template-columns: repeat(7, minmax(192px, 1fr));
   gap: 8px;
   margin-top: 18px;
   overflow-x: auto;
@@ -615,15 +615,15 @@ small {
 .phase {
   position: relative;
   z-index: 1;
-  min-height: 136px;
-  min-width: 180px;
-  padding: 13px 16px 14px;
+  min-height: 154px;
+  min-width: 192px;
+  padding: 13px 16px 13px;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--canvas-subtle);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+  display: grid;
+  grid-template-rows: auto minmax(42px, auto) 1fr;
+  gap: 8px;
   width: 100%;
   text-align: left;
   color: inherit;
@@ -783,8 +783,8 @@ small {
 .phase strong {
   font-weight: 560;
   line-height: 1.3;
-  min-height: 38px;
-  margin-bottom: 4px;
+  min-height: 42px;
+  margin: 0;
   display: -webkit-box;
   overflow: hidden;
   -webkit-line-clamp: 2;
@@ -801,17 +801,15 @@ small {
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  flex: 1;
-  min-height: 52px;
-  justify-content: flex-start;
+  min-height: 58px;
+  justify-content: space-between;
   color: var(--fg-muted);
 }
 
 .phase-detail > span:first-child {
   display: -webkit-box;
-  min-height: 38px;
   overflow: hidden;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 }
 

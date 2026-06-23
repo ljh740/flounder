@@ -462,7 +462,27 @@ test("api: launching prepare clears the current scope inventory projection", asy
     const inventoryDir = projectHistoryDir({ outputDir: out, targetName: "prepare-clears-scopes" });
     const store = MetadataStore.openForOutput(out);
     try {
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "prepare-clears-scopes-audit") });
       store.upsertScopes(created.id, [{ scopeId: "old-scope", title: "Old scope", status: "pending", score: 1 }]);
+      store.upsertFindings(created.id, auditRun, [
+        {
+          findingKey: "old-verified",
+          title: "Old verified finding",
+          location: "src/Old.sol:9",
+          severity: "high",
+          status: "confirmed-executable",
+          confidence: 0.9,
+        },
+      ]);
+      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "prepare-clears-scopes-confirm") });
+      store.upsertConfirmDecisions(created.id, confirmRun, [
+        {
+          bug: "Old verified finding",
+          reproduced: "yes",
+          recommendation: "submit-candidate",
+          members: ["old-verified"],
+        },
+      ]);
       await saveScopeInventory(inventoryDir, [{ id: "old-scope", title: "Old scope", status: "pending", score: 1 }]);
     } finally {
       store.close();
@@ -478,6 +498,23 @@ test("api: launching prepare clears the current scope inventory projection", asy
     }
     const inventory = await loadScopeInventory(inventoryDir);
     assert.deepEqual(inventory, []);
+
+    const detail = await json(await fetch(`${base}/api/projects/${created.uuid}`));
+    assert.equal(detail.progress.total, 0);
+    assert.equal(detail.findingsTotal, 0);
+    assert.equal(detail.reproducedBugs, 0);
+    assert.deepEqual(detail.confirmDecisions, []);
+    assert.equal(detail.prepareSummary, null);
+    assert.ok(detail.material.activePrepareRefreshStartedAt);
+
+    const list = await json(await fetch(`${base}/api/projects`));
+    const snapshot = list.projects.find((project) => project.uuid === created.uuid);
+    assert.equal(snapshot.progress.total, 0);
+    assert.equal(snapshot.findingsTotal, 0);
+    assert.equal(snapshot.reproducedBugs, 0);
+    assert.equal(snapshot.confirmDecisionCount, 0);
+    assert.equal(snapshot.activeRuns, 1);
+    assert.equal(snapshot.latestRun, null);
   });
 });
 
