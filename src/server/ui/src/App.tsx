@@ -1637,7 +1637,7 @@ function ProjectDetailView(props: {
     if (runningRun?.kind === "prepare" && online.length === 0) {
       return {
         stat: "Waiting for daemon",
-        detail: "Acquire source, match deployment, warm the build sandbox",
+        detail: "Stage source, match target, warm sandbox",
       };
     }
     if (phases.prepare.status === "none" && (config.sourcePaths.length || config.buildRoot)) {
@@ -1648,7 +1648,7 @@ function ProjectDetailView(props: {
     }
     return {
       stat: phases.prepare.stat,
-      detail: "Acquire source, match deployment, warm the build sandbox",
+      detail: "Stage source, match target, warm sandbox",
     };
   })();
   const phaseDisplayStatus = (phase: ProjectPhase) => {

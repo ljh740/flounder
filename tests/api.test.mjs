@@ -518,6 +518,78 @@ test("api: launching prepare clears the current scope inventory projection", asy
   });
 });
 
+test("api: running prepare resets the project current view to the new material snapshot", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "prepare-refresh-running", sourcePaths: ["./src"] }));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const prepare1 = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "prepare-refresh-running-prepare-1") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", prepare1);
+      store.finishRun(prepare1, "done");
+
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "prepare-refresh-running-audit") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T01:00:00.000Z", auditRun);
+      store.updateRunCoverage(auditRun, { total: 42, audited: 30, pending: 12 });
+      store.recordStage(auditRun, "synthesis", { status: "done", produced: 2, scopes: 30 });
+      store.upsertScopes(created.id, [{ scopeId: "old-scope", title: "Old scope", status: "audited", score: 1 }]);
+      store.upsertFindings(created.id, auditRun, [
+        {
+          findingKey: "old-verified",
+          title: "Old verified finding",
+          location: "src/Old.sol:9",
+          severity: "high",
+          status: "confirmed-executable",
+          confidence: 0.9,
+          reportMarkdown: "# Old report\n",
+        },
+      ]);
+      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "prepare-refresh-running-confirm") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T02:00:00.000Z", confirmRun);
+      store.upsertConfirmDecisions(created.id, confirmRun, [
+        {
+          bug: "Old verified finding",
+          reproduced: "yes",
+          recommendation: "submit-candidate",
+          members: ["old-verified"],
+        },
+      ]);
+      store.finishRun(confirmRun, "done");
+      const reportRun = store.startRun({ projectId: created.id, kind: "report", runDir: path.join(out, "prepare-refresh-running-report") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T03:00:00.000Z", reportRun);
+      store.finishRun(reportRun, "done");
+
+      const jobId = store.enqueueJob(created.name, { verb: "prepare" });
+      const prepare2 = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "prepare-refresh-running-prepare-2") });
+      store.setJobRun(jobId, prepare2);
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.deepEqual(detail.progress, { total: 0, audited: 0, deferred: 0, pending: 0 });
+    assert.equal(detail.findingsTotal, 0);
+    assert.equal(detail.auditConfirmedFindings, 0);
+    assert.equal(detail.reproducedBugs, 0);
+    assert.deepEqual(detail.confirmDecisions, []);
+    assert.deepEqual(detail.allFindings, []);
+    assert.equal(detail.currentRunsTotal, 1);
+    assert.equal(detail.runs[0].kind, "prepare");
+    assert.equal(detail.runs.some((run) => run.kind === "audit" && run.material_stale === true), true);
+
+    const list = await json(await fetch(base + "/api/projects"));
+    const snapshot = list.projects.find((project) => project.uuid === created.uuid);
+    assert.deepEqual(snapshot.progress, { total: 0, audited: 0, deferred: 0, pending: 0 });
+    assert.equal(snapshot.findingsTotal, 0);
+    assert.equal(snapshot.auditConfirmedFindings, 0);
+    assert.equal(snapshot.reproducedBugs, 0);
+    assert.equal(snapshot.confirmDecisionCount, 0);
+    assert.equal(snapshot.currentRunCount, 1);
+    assert.equal(snapshot.latestRun.kind, "prepare");
+  });
+});
+
 test("api: report launch queues only reproduced real-target findings that were not dropped", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
