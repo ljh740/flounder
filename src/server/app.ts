@@ -895,7 +895,11 @@ function currentScopeView(
   if (checkpoint) return { scopes: checkpoint.scopes, progress: checkpoint.progress, total: checkpoint.scopes.length, hasInventory: true };
 
   // A running remap/map invalidates the prior inventory for the current view until it checkpoints.
-  if (stringValue(latestRun.status) === "running") return { scopes: [], progress: emptyProgress(), total: 0, hasInventory: true };
+  // A running audit is downstream of the inventory; before its first checkpoint, keep showing
+  // the stored scope list rather than making the project look unmapped.
+  if (stringValue(latestRun.status) === "running" && stringValue(latestRun.kind) === "map") {
+    return { scopes: [], progress: emptyProgress(), total: 0, hasInventory: true };
+  }
 
   return {
     scopes: store.queryScopes(projectId, { limit: 50, offset: 0 }),

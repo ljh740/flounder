@@ -1835,6 +1835,37 @@ test("api: running remap checkpoint replaces stored scope inventory in current v
   });
 });
 
+test("api: running audit keeps the mapped scope inventory before its first checkpoint", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "audit-keeps-scopes", sourcePaths: ["./src"] }));
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        { scopeId: "S1", title: "Mapped scope", status: "pending", score: 10 },
+      ]);
+      const mapRun = store.startRun({ projectId: created.id, kind: "map", runDir: path.join(out, "audit-keeps-scopes-map") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", mapRun);
+      store.finishRun(mapRun, "done");
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "audit-keeps-scopes-audit") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T01:00:00.000Z", auditRun);
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.deepEqual(detail.progress, { total: 1, audited: 0, deferred: 0, pending: 1 });
+    assert.equal(detail.scopes.length, 1);
+    assert.equal(detail.scopes[0].scope_id, "S1");
+
+    const scopes = await json(await fetch(base + `/api/projects/${created.uuid}/scopes`));
+    assert.equal(scopes.total, 1);
+    assert.equal(scopes.scopes[0].scope_id, "S1");
+  });
+});
+
 test("api: scope prioritize moves a mapped scope to the top of the queue", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
