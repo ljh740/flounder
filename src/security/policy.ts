@@ -276,7 +276,7 @@ function isAllowedLocalTestCommand(program: string, args: string[]): boolean {
   const name = program.toLowerCase();
   const first = args[0]?.toLowerCase();
   const second = args[1]?.toLowerCase();
-  if (name === "cargo") return first === "test";
+  if (name === "cargo") return cargoSubcommand(args) === "test";
   if (name === "go") return first === "test";
   if (name === "npm") return first === "test" || (first === "run" && second === "test");
   if (name === "pnpm" || name === "yarn" || name === "bun") return first === "test" || (first === "run" && second === "test");
@@ -305,7 +305,7 @@ function isAllowedBuildCommand(program: string, args: string[]): boolean {
   const first = args[0]?.toLowerCase();
   const second = args[1]?.toLowerCase();
   const lower = args.map((arg) => arg.toLowerCase());
-  if (name === "cargo") return ["build", "fetch", "check", "generate-lockfile", "vendor", "update"].includes(first ?? "");
+  if (name === "cargo") return ["build", "fetch", "check", "generate-lockfile", "vendor", "update"].includes(cargoSubcommand(args) ?? "");
   if (name === "go") return first === "build" || first === "mod"; // go build / go mod download|tidy|vendor
   if (name === "npm") return ["install", "ci", "i"].includes(first ?? "");
   if (name === "pnpm" || name === "yarn" || name === "bun") return ["install", "i", "ci"].includes(first ?? "") || (name === "yarn" && args.length === 0);
@@ -321,6 +321,25 @@ function isAllowedBuildCommand(program: string, args: string[]): boolean {
   if (name === "gradle" || name === "gradlew") return lower.some((arg) => ["build", "assemble", "classes", "compilejava", "dependencies"].includes(arg));
   if (name === "npx") return first === "hardhat" && second === "compile";
   return false;
+}
+
+function cargoSubcommand(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]?.toLowerCase() ?? "";
+    if (!arg) continue;
+    if (/^\+[\w.-]+$/.test(arg)) continue;
+    if (arg === "--") return undefined;
+    if (arg === "-z" || arg === "--config" || arg === "-c" || arg === "--color" || arg === "--manifest-path") {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-z") || arg.startsWith("--config=") || arg.startsWith("--color=") || arg.startsWith("--manifest-path=")) {
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    return arg;
+  }
+  return undefined;
 }
 
 function isAllowedLocalInspectionCommand(program: string, args: string[]): boolean {

@@ -7,6 +7,7 @@ const cmd = (program, ...args) => ({ program, args });
 test("agent bash allows build/dependency commands (the build phase) across ecosystems", () => {
   for (const c of [
     cmd("cargo", "build"),
+    cmd("cargo", "-Znext-lockfile-bump", "build"),
     cmd("cargo", "fetch"),
     cmd("npm", "install"),
     cmd("go", "mod", "download"),
@@ -31,6 +32,10 @@ test("a build command is NOT confirmation-eligible (build cannot mint a finding)
   // and a test runner is a confirm command, not a build command
   assert.equal(isAgentBuildCommand(cmd("cargo", "test")), false);
   assert.equal(isAgentConfirmCommand(cmd("cargo", "test")), true);
+  assert.equal(isAgentBuildCommand(cmd("cargo", "-Znext-lockfile-bump", "test")), false);
+  assert.equal(isAgentConfirmCommand(cmd("cargo", "-Znext-lockfile-bump", "test")), true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "-Znext-lockfile-bump", "test", "--test", "padded_proof_acceptance")).blocked, false);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "+nightly", "-Z", "next-lockfile-bump", "test")).blocked, false);
   assert.equal(isAgentBuildCommand(cmd("ctest", "--test-dir", "build/bbapi-poc")), false);
   assert.equal(isAgentConfirmCommand(cmd("ctest", "--test-dir", "build/bbapi-poc")), true);
 });
