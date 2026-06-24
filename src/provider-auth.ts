@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
-import { findEnvKeys, getEnvApiKey, getProviders } from "@earendil-works/pi-ai";
+import { findEnvKeys, getEnvApiKey, getProviders } from "@earendil-works/pi-ai/compat";
 import { getOAuthProvider, getOAuthProviders, type OAuthPrompt, type OAuthSelectPrompt } from "@earendil-works/pi-ai/oauth";
 import { flounderHomeDir } from "./config.js";
 

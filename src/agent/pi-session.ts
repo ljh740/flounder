@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { getModel, getProviders } from "@earendil-works/pi-ai";
+import { getModel, getProviders } from "@earendil-works/pi-ai/compat";
 import { createAgentSession, defineTool, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";

@@ -1,4 +1,4 @@
-import { complete, getModel, getProviders, type KnownProvider } from "@earendil-works/pi-ai";
+import { complete, getModel, getProviders, type KnownProvider } from "@earendil-works/pi-ai/compat";
 import type { LlmClient } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { ThinkingLevel } from "../config.js";
