@@ -260,6 +260,7 @@ const ROUTES: Route[] = [
       verb: "'run' | 'map' | 'audit' | 'confirm' | 'report' | 'prepare' (default 'run'; project run = prepare-if-needed→map/dig→verify→confirm→report; source run = map→dig→verify)",
       remap: "boolean? — re-enumerate scopes (restart)", fresh: "boolean? — confirm: ignore a prior interrupted confirm",
       quick: "boolean? — run: single breadth pass", mockLlm: "boolean? — offline mock model",
+      verifyFromStart: "boolean? — run/continue pipeline: re-run Verify from the beginning instead of only pending candidates",
       region: "string? — audit: pinned region e.g. src/Foo.sol:120-180", scope: "string? — audit: scope id(s)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution; project finding rows with id are linked back to that original row",
       allowMaterialDrift: "boolean? — expert override for verifyFindings when a newer Prepare run changed project materials after the selected findings were produced",
       regenerateReports: "boolean? — report: include findings that already have formal reports; selected findingIds are always regenerated",
@@ -414,7 +415,7 @@ const ROUTES: Route[] = [
       provider: "string?", model: "string?", thinking: "string?",
       scopeCoverageMode: "focused|standard|half|full|custom? — standard/focused are cumulative project targets, not per-run additions", maxScopes: "number?", mapSteps: "number?", digSteps: "number?", maxSteps: "number?", digSamples: "number?", digConcurrency: "number?",
       sandboxBackend: "'auto'|'oci'|'host'?", sandboxImage: "string?", sandboxAllowHostFallback: "boolean?", sandboxPrepareNetwork: "'none'|'enabled'?", sandboxConfirmNetwork: "'none'|'enabled'?",
-      remap: "boolean?", quick: "boolean?", mockLlm: "boolean?", pipeline: "boolean? — run clue pipeline: prepare if needed -> map/dig -> verify -> confirm -> report", region: "string?", scope: "string?", scopeNote: "string? — map/audit: 'authorized scope note' that focuses map on the in-scope target (the pipeline auto-derives it from prepare's manifest)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution",
+      remap: "boolean?", quick: "boolean?", mockLlm: "boolean?", pipeline: "boolean? — run clue pipeline: prepare if needed -> map/dig -> verify -> confirm -> report", verifyFromStart: "boolean? — pipeline: re-run Verify from the beginning instead of only pending candidates", region: "string?", scope: "string?", scopeNote: "string? — map/audit: 'authorized scope note' that focuses map on the in-scope target (the pipeline auto-derives it from prepare's manifest)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution",
       inputRunDir: "string? — confirm", fresh: "boolean? — confirm",
       clue: "string? — prepare", posture: "string? — prepare", matchDeployed: "boolean? — prepare", endpoint: "string? — prepare",
     },
@@ -2154,6 +2155,7 @@ function normalizeLaunchSpec(body: Record<string, unknown>, target: string, verb
     quick: bool(body.quick),
     mockLlm: bool(body.mockLlm),
     pipeline: bool(body.pipeline),
+    verifyFromStart: bool(body.verifyFromStart),
     region: str(body.region),
     scope: str(body.scope),
     scopeNote: str(body.scopeNote),
@@ -2963,7 +2965,7 @@ async function daemonRunActivity(c: Ctx): Promise<void> {
 async function daemonPipelineWorklist(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
-  const body = (await readBody(c.req)) as { project?: string; phase?: string };
+  const body = (await readBody(c.req)) as { project?: string; phase?: string; verifyFromStart?: boolean };
   const projectName = typeof body.project === "string" ? body.project.trim() : "";
   if (!projectName) return sendJson(c.res, 400, { error: "project is required" });
   const phase = body.phase === "verify" || body.phase === "confirm" || body.phase === "report" ? body.phase : "";
@@ -2980,9 +2982,10 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
   const requiresRealTargetConfirmation = latestPrepareRequiresRealTargetConfirmation(allRuns);
 
   if (phase === "verify") {
-    const verifyFindings = verifyWorklist(c.store, projectId, currentResultRunIds, materialBoundary);
+    const verifyFindings = verifyWorklist(c.store, projectId, currentResultRunIds, materialBoundary, body.verifyFromStart === true);
     return sendJson(c.res, 200, {
       phase,
+      verifyFromStart: body.verifyFromStart === true,
       verifyFindings,
     });
   }
@@ -3012,13 +3015,15 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
   });
 }
 
-function verifyWorklist(store: MetadataStore, projectId: number, currentResultRunIds: Set<number>, materialBoundary?: Record<string, unknown>): unknown[] {
+function verifyWorklist(store: MetadataStore, projectId: number, currentResultRunIds: Set<number>, materialBoundary?: Record<string, unknown>, fromStart = false): unknown[] {
   return reportableFindings(store.listFindings(projectId)
     .filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary))
     .filter((row) => !isIgnoredFinding(row)))
     .filter((row) => {
       const status = String(row.status ?? "");
-      return status === "suspected" || status === "confirmed-source";
+      if (status === "suspected" || status === "confirmed-source") return true;
+      if (!fromStart || row.confirm_status != null) return false;
+      return status === "confirmed-executable" || status === "confirmed-differential";
     })
     .map((row) => normalizeProjectVerifyFindings(findingDetailRow(row)));
 }
@@ -3427,6 +3432,7 @@ function launchSpec(project: Record<string, unknown>, body: Record<string, unkno
     quick: Boolean(body.quick),
     mockLlm: Boolean(body.mockLlm),
     pipeline: Boolean(body.pipeline),
+    verifyFromStart: Boolean(body.verifyFromStart),
     region: str(body.region),
     scope: str(body.scope),
     scopeNote: str(merged.scopeNote), // a project may store a default focus note in its config

@@ -234,7 +234,7 @@ async function runPipelineJob(
   });
   await ctx.flushTracker();
 
-  const verify = await pipelineWorklist(base, headers, spec.target, "verify");
+  const verify = await pipelineWorklist(base, headers, spec.target, "verify", spec.verifyFromStart === true);
   if (verify.verifyFindings.length > 0) {
     const verifySpec: LaunchSpec = {
       ...spec,
@@ -310,14 +310,18 @@ async function runPipelineJob(
   }
 }
 
-async function pipelineWorklist(base: string, headers: Record<string, string>, project: string, phase: "verify" | "confirm" | "report"): Promise<{
+async function pipelineWorklist(base: string, headers: Record<string, string>, project: string, phase: "verify" | "confirm" | "report", verifyFromStart = false): Promise<{
   verifyFindings: unknown[];
   inputRunDir?: string;
   inputRunDirs: string[];
   confirmKeys: string[];
   reportFindings: ReportFindingSpec[];
 }> {
-  const res = await fetch(base + "/api/daemon/pipeline-worklist", { method: "POST", headers, body: JSON.stringify({ project, phase }) });
+  const res = await fetch(base + "/api/daemon/pipeline-worklist", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ project, phase, ...(phase === "verify" && verifyFromStart ? { verifyFromStart: true } : {}) }),
+  });
   if (!res.ok) throw new Error(`pipeline ${phase} worklist failed (${res.status})`);
   const body = (await res.json().catch(() => ({}))) as {
     inputRunDir?: unknown;

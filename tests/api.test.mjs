@@ -57,6 +57,7 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     assert.match(projectOrder.summary, /drag-and-drop/);
     const projectRun = cat.endpoints.find((e) => e.method === "POST" && e.path === "/api/projects/:uuid/runs");
     assert.match(projectRun.body.verb, /report/);
+    assert.match(projectRun.body.verifyFromStart, /re-run Verify from the beginning/);
     assert.match(projectRun.body.scopeCoverageMode, /one-off coverage mode/);
     assert.match(projectRun.body.maxScopes, /one-off scope cap/);
     assert.match(projectRun.body.mapSteps, /one-off map turn cap/);
@@ -426,6 +427,15 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     assert.equal(verify.verifyFindings[0].id, suspectedId);
     assert.equal(verify.verifyFindings[0].originId, suspectedId);
     assert.equal(verify.verifyFindings[0].finding_key, "suspected-bug");
+
+    const restartVerify = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "verify", verifyFromStart: true }),
+    }));
+    assert.equal(restartVerify.phase, "verify");
+    assert.equal(restartVerify.verifyFromStart, true);
+    assert.deepEqual(new Set(restartVerify.verifyFindings.map((finding) => finding.finding_key)), new Set(["suspected-bug", "confirmed-bug"]));
 
     const confirm = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",

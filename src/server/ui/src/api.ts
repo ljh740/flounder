@@ -367,6 +367,7 @@ export interface LaunchPayload {
   quick?: boolean;
   mockLlm?: boolean;
   remap?: boolean;
+  verifyFromStart?: boolean;
   findingId?: number;
   findingIds?: number[];
   verifyFindings?: unknown;
