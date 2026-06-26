@@ -3160,6 +3160,37 @@ small {
   padding: 11px 12px;
 }
 
+.decision-row.submit-candidate {
+  border-color: color-mix(in srgb, var(--success) 36%, var(--border));
+  background: color-mix(in srgb, var(--success) 7%, var(--canvas-subtle));
+}
+
+.overview-decision-list {
+  margin-top: 8px;
+}
+
+.overview-decision-row {
+  min-height: 64px;
+  padding: 10px 11px;
+}
+
+.overview-more-link {
+  justify-self: start;
+  width: fit-content;
+  margin-top: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.overview-more-link:hover {
+  text-decoration: underline;
+}
+
 .decision-main {
   min-width: 0;
   display: grid;
@@ -3194,6 +3225,34 @@ small {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+}
+
+.decision-recommendation {
+  font-weight: 700;
+}
+
+.decision-recommendation-submit {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  border-color: color-mix(in srgb, var(--success) 44%, transparent);
+}
+
+.decision-recommendation-needs-human {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 36%, transparent);
+}
+
+.decision-recommendation-drop {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+}
+
+.decision-recommendation-neutral {
+  color: var(--fg-muted);
+  background: var(--canvas-inset);
+  border-color: var(--border);
 }
 
 .decision-confidence {

@@ -60,10 +60,33 @@ test("ui: phase cards count report packages by reproduced decision, not linked f
   };
   const phases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
   assert.equal(phases.confirm.stat, "1/1 reproduced · 1 finding waiting");
-  assert.equal(phases.report.stat, "1 waiting for formal report");
+  assert.equal(phases.report.stat, "1 waiting for formal report · 1 submit candidate");
   detail.confirmDecisions[0].has_report = true;
   const readyPhases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
   assert.equal(readyPhases.report.stat, "1/1 report ready · 1 submission");
+});
+
+test("ui: phase cards do not double-count findings already covered by decisions", () => {
+  const detail = {
+    runs: [],
+    material: {},
+    scopes: [],
+    activeScopeCount: 0,
+    findingsTotal: 2,
+    statusCounts: {},
+    prepareSummary: { realTarget: { requiresConfirmation: true } },
+    allFindings: [
+      { id: 1, finding_key: "kone", status: "confirmed-differential", confirm_status: null, has_report: false },
+      { id: 2, finding_key: "ktwo", status: "confirmed-differential", confirm_status: null, has_report: false },
+    ],
+    confirmDecisions: [
+      { bug: "submit root cause", reproduced: "yes", recommendation: "submit-candidate", members_json: JSON.stringify(["kone"]) },
+      { bug: "setup blocker", reproduced: "could-not-set-up", recommendation: "needs-human", members_json: JSON.stringify(["ktwo"]) },
+    ],
+  };
+  const phases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
+  assert.equal(phases.confirm.stat, "1/2 reproduced · 1 need human");
+  assert.equal(phases.report.stat, "1 waiting for formal report · 1 submit candidate");
 });
 
 test("ui: verify card treats external-evidence leads as reviewed, not waiting", () => {

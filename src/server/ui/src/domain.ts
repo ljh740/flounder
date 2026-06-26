@@ -51,6 +51,52 @@ function isExecutionConfirmedFinding(finding: FindingRow): boolean {
   return finding.status === "confirmed-executable" || finding.status === "confirmed-differential";
 }
 
+function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
+  const members = parseJsonArray(decision.members_json);
+  const keys = new Set<string>();
+  const add = (value: string) => {
+    const key = value.trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    if (/^k[0-9a-z]+$/.test(key)) keys.add(key);
+  };
+  for (const member of members) {
+    if (typeof member !== "string") continue;
+    const cleaned = member.trim();
+    add(cleaned);
+    add(cleaned.split(/\s+/)[0] ?? "");
+    const bracketed = cleaned.match(/^\[(k[0-9a-z]+)\]/i)?.[1];
+    if (bracketed) add(bracketed);
+    const embedded = cleaned.match(/\b(k[0-9a-z]+)\b/i)?.[1];
+    if (embedded) add(embedded);
+  }
+  return [...keys];
+}
+
+function parseJsonArray(raw?: string | null): unknown[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function findingCoveredByDecision(finding: FindingRow, decidedFindingKeys: Set<string>): boolean {
+  return Boolean(finding.finding_key && decidedFindingKeys.has(finding.finding_key.toLowerCase()));
+}
+
+function confirmDecisionTail(decisions: ConfirmDecision[]): string {
+  const pending = decisions.filter((decision) => !decision.reproduced || decision.reproduced === "pending").length;
+  const needsHuman = decisions.filter((decision) => decision.recommendation === "needs-human").length;
+  const notReproduced = decisions.filter((decision) => decision.reproduced === "no" && decision.recommendation !== "needs-human").length;
+  const parts = [
+    pending ? `${pending} pending` : "",
+    needsHuman ? `${needsHuman} need human` : "",
+    notReproduced ? `${notReproduced} not reproduced` : "",
+  ].filter(Boolean);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
 export function rankCandidates(rows: FindingRow[] | undefined): FindingRow[] {
   return [...(rows ?? [])]
     .filter((f) => (STATUS_RANK[f.status] ?? 0) >= 2 && (SEV_RANK[f.severity ?? ""] ?? 0) >= 2)
@@ -287,8 +333,9 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const conf = latest("confirm");
   const synthesis = stages(latestRunWithStage(runs, "synthesis")).synthesis;
   const requiresConfirmation = needsRealTargetConfirmation(detail);
+  const decidedFindingKeys = new Set(decisions.flatMap(confirmDecisionMemberKeys));
   const pendingConfirmRaw = requiresConfirmation
-    ? findings.filter((finding) => isExecutionConfirmedFinding(finding) && !finding.confirm_status).length
+    ? findings.filter((finding) => isExecutionConfirmedFinding(finding) && !finding.confirm_status && !findingCoveredByDecision(finding, decidedFindingKeys)).length
     : 0;
   const pendingVerify = findings.filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
   const locallyVerified = findings.filter(isExecutionConfirmedFinding).length;
@@ -408,7 +455,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
         : verifyRechecksConfirmed
           ? "Waiting for Verify to finish"
         : decisions.length
-        ? `${repro}/${decisions.length} reproduced${pendingConfirm ? ` · ${pendingConfirm} ${pendingConfirm === 1 ? "finding" : "findings"} waiting` : ""}`
+        ? `${repro}/${decisions.length} reproduced${confirmDecisionTail(decisions)}${pendingConfirm ? ` · ${pendingConfirm} ${pendingConfirm === 1 ? "finding" : "findings"} waiting` : ""}`
         : pendingConfirm > 0
           ? `${pendingConfirm} waiting for real-target confirmation`
           : "Not started",
@@ -421,7 +468,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
         : reportPackages.ready > 0
           ? `${reportPackages.ready}/${reportPackages.total} ${reportPackages.total === 1 ? "report" : "reports"} ready${reportPackages.submissions ? ` · ${reportPackages.submissions} ${reportPackages.submissions === 1 ? "submission" : "submissions"}` : ""}`
           : reportPackages.total > 0
-            ? `${reportPackages.total} waiting for formal report`
+            ? `${reportPackages.total} waiting for formal report${reportPackages.submissions ? ` · ${reportPackages.submissions} ${reportPackages.submissions === 1 ? "submit candidate" : "submit candidates"}` : ""}`
             : decisions.length > 0
               ? "No reproduced bug yet"
               : "Not started",

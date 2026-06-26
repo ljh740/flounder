@@ -242,7 +242,7 @@ function snapshotFromDetail(project: ProjectSnapshot, detail: ProjectDetail): Pr
     reproducedBugs: current.reproducedBugs,
     confirmedBugs: current.confirmedBugs,
     verifyPendingFindings: pendingVerifyFindings(current.allFindings).length,
-    confirmPendingFindings: pendingConfirmFindings(current.allFindings, requiresConfirmation).length,
+    confirmPendingFindings: pendingConfirmFindings(current.allFindings, requiresConfirmation, current.confirmDecisions).length,
     confirmDecisionCount: current.confirmDecisions.length,
     latestRun: currentRuns[0] ?? null,
     currentRunCount: current.currentRunsTotal ?? currentRuns.length,
@@ -723,9 +723,14 @@ function isExecutionConfirmedFinding(finding: FindingRow): boolean {
   return finding.status === "confirmed-executable" || finding.status === "confirmed-differential";
 }
 
-function pendingConfirmFindings(rows: FindingRow[] | undefined, requiresConfirmation = true): FindingRow[] {
+function pendingConfirmFindings(rows: FindingRow[] | undefined, requiresConfirmation = true, decisions?: ConfirmDecision[]): FindingRow[] {
   if (!requiresConfirmation) return [];
-  return activeFindings(rows).filter((finding) => isExecutionConfirmedFinding(finding) && !finding.confirm_status);
+  const decidedFindingKeys = new Set((decisions ?? []).flatMap(confirmDecisionMemberKeys));
+  return activeFindings(rows).filter((finding) =>
+    isExecutionConfirmedFinding(finding)
+    && !finding.confirm_status
+    && !(finding.finding_key && decidedFindingKeys.has(finding.finding_key.toLowerCase()))
+  );
 }
 
 function localVerifiedFindings(rows: FindingRow[] | undefined): FindingRow[] {
@@ -1657,7 +1662,7 @@ export function App() {
         return;
       }
       const requiresConfirmation = needsRealTargetConfirmation(currentDetail);
-      if (action === "confirm" && pendingConfirmFindings(currentDetail.allFindings, requiresConfirmation).length === 0) {
+      if (action === "confirm" && pendingConfirmFindings(currentDetail.allFindings, requiresConfirmation, currentDetail.confirmDecisions).length === 0) {
         setToast({ tone: "warning", message: "There are no audit-confirmed findings waiting for real-target confirmation yet." });
         setModal(null);
         return;
@@ -2408,8 +2413,9 @@ function ProjectDetailView(props: {
   const runningInactive = runningRun ? runInactiveLabel(runningRun) : null;
   const requiresConfirmation = needsRealTargetConfirmation(detail);
   const rawPendingVerify = rawPendingVerifyCount(allFindings);
+  const needsEvidenceCount = activeFindings(allFindings).filter((finding) => finding.status === "needs-evidence").length;
   const verifyRechecksConfirmed = verifyRunRechecksConfirmed(runningVerify, rawPendingVerify, activeFindings(allFindings).length);
-  const pendingConfirmBase = pendingConfirmFindings(allFindings, requiresConfirmation).length;
+  const pendingConfirmBase = pendingConfirmFindings(allFindings, requiresConfirmation, confirmDecisions).length;
   const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmBase;
   const pendingVerify = runningVerifyProgress ? runningVerifyProgress.remaining : verifyCandidates.length;
   const pendingReports = requiresConfirmation ? pendingDecisionReports(confirmDecisions).length : pendingFormalReports(allFindings, requiresConfirmation).length;
@@ -2420,8 +2426,8 @@ function ProjectDetailView(props: {
     : reportableFindings(allFindings, requiresConfirmation).filter((finding) => finding.has_report).length;
   const reportStat = pendingReports > 0 ? pendingReports : reportsReady;
   const reportLabel = pendingReports > 0 ? "to report" : "reports";
-  const candidateStat = pendingVerify > 0 ? pendingVerify : overviewCandidates.length;
-  const candidateLabel = pendingVerify > 0 ? "to verify" : "candidates";
+  const candidateStat = pendingVerify > 0 ? pendingVerify : needsEvidenceCount > 0 ? needsEvidenceCount : overviewCandidates.length;
+  const candidateLabel = pendingVerify > 0 ? "to verify" : needsEvidenceCount > 0 ? "need evidence" : "top findings";
   const localVerifySummary = activeVerifySummary(runningVerify) || verifyStatusSummary(allFindings);
   const setupAttention = prepareMaterialsAttention(detail.prepareSummary);
   const launchLocked = props.busy || Boolean(runningRun);
@@ -2434,15 +2440,17 @@ function ProjectDetailView(props: {
     .filter((entry) => entry.provider);
   const currentRunningRuns = currentRuns.filter((run) => run.status === "running").length;
   const sourceState = projectSourceState(detail, config.sourcePaths);
+  const openProjectSection = (nextTab: ProjectTab, sectionId?: string) => {
+    setTab(nextTab);
+    if (sectionId) window.setTimeout(() => scrollToProjectSection(sectionId), 0);
+  };
   const openLinkedFinding = (finding: FindingRow) => {
     props.setFindingStatus("");
     props.setFindingQuery(`#${finding.id}`);
-    setTab("findings");
-    scrollToProjectSection("project-findings");
+    openProjectSection("findings", "project-findings");
   };
   const openSetupTab = () => {
-    setTab("setup");
-    window.setTimeout(() => scrollToProjectSection("project-setup-tab"), 0);
+    openProjectSection("setup", "project-setup-tab");
   };
   const currentProject: ProjectSnapshot = {
     ...project,
@@ -2523,31 +2531,26 @@ function ProjectDetailView(props: {
   };
   const jumpToPhase = (phase: ProjectPhase) => {
     if (phase === "prepare") {
-      setTab("setup");
-      scrollToProjectSection("project-setup-tab");
+      openProjectSection("setup", "project-setup-tab");
       return;
     }
     if (phase === "map") {
-      setTab("scopes");
+      openProjectSection("scopes");
       return;
     }
     if (phase === "dig" || phase === "verify") {
-      setTab("overview");
-      scrollToProjectSection("project-top-candidates");
+      openProjectSection("overview", "project-top-candidates");
       return;
     }
     if (phase === "synthesis") {
-      setTab("overview");
-      scrollToProjectSection("project-audit-status");
+      openProjectSection("overview", "project-audit-status");
       return;
     }
     if (phase === "confirm" || phase === "report") {
-      setTab("decisions");
-      scrollToProjectSection("project-real-target-decisions");
+      openProjectSection("decisions", "project-real-target-decisions");
       return;
     }
-    setTab("overview");
-    scrollToProjectSection("project-setup");
+    openProjectSection("overview", "project-setup");
   };
   return (
     <div className="project-page">
@@ -2635,14 +2638,14 @@ function ProjectDetailView(props: {
           })}
         </div>
         <div className="stats">
-          <Stat n={progress.total} label="mapped" onClick={() => setTab("scopes")} />
-          <Stat n={progress.audited} label="audited" onClick={() => setTab("scopes")} />
-          <Stat n={candidateStat} label={candidateLabel} onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); setTab("overview"); scrollToProjectSection("project-top-candidates"); }} />
-          <Stat n={displayedVerified} label={runningVerifyProgress ? "checked" : "verified"} good onClick={() => { props.setFindingStatus("execution-confirmed"); props.setFindingQuery(""); setTab("findings"); }} />
-          <Stat n={reproduced} label="reproduced" onClick={() => { setTab("decisions"); scrollToProjectSection("project-real-target-decisions"); }} />
-          <Stat n={reportStat} label={reportLabel} onClick={() => { setTab("decisions"); scrollToProjectSection("project-real-target-decisions"); }} />
+          <Stat n={progress.total} label="mapped" onClick={() => openProjectSection("scopes")} />
+          <Stat n={progress.audited} label="audited" onClick={() => openProjectSection("scopes")} />
+          <Stat n={candidateStat} label={candidateLabel} onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); openProjectSection("overview", "project-top-candidates"); }} />
+          <Stat n={displayedVerified} label={runningVerifyProgress ? "checked" : "verified"} good onClick={() => { props.setFindingStatus("execution-confirmed"); props.setFindingQuery(""); openProjectSection("findings", "project-findings"); }} />
+          <Stat n={reproduced} label="reproduced" onClick={() => openProjectSection("decisions", "project-real-target-decisions")} />
+          <Stat n={reportStat} label={reportLabel} onClick={() => openProjectSection("decisions", "project-real-target-decisions")} />
         </div>
-        <RealTargetCallout decisions={confirmDecisions} onOpen={() => { setTab("decisions"); scrollToProjectSection("project-real-target-decisions"); }} />
+        <RealTargetCallout decisions={confirmDecisions} onOpen={() => openProjectSection("decisions", "project-real-target-decisions")} />
         <ProjectSetupDisclosure items={readyItems} />
       </Card>
       <div className="tabs" role="tablist" aria-label="Project sections">
@@ -2662,7 +2665,18 @@ function ProjectDetailView(props: {
           </button>
         ))}
       </div>
-      {tab === "overview" ? <ProjectOverview detail={currentDetail} candidates={overviewCandidates} verifyCount={pendingVerify} verifyLocked={launchLocked || pendingVerify === 0} onVerifyCandidates={() => props.onLaunch("verify")} onOpenReport={props.onOpenReport} /> : null}
+      {tab === "overview" ? (
+        <ProjectOverview
+          detail={currentDetail}
+          candidates={overviewCandidates}
+          verifyCount={pendingVerify}
+          verifyLocked={launchLocked || pendingVerify === 0}
+          onVerifyCandidates={() => props.onLaunch("verify")}
+          onOpenReport={props.onOpenReport}
+          onOpenDecisionReport={props.onOpenDecisionReport}
+          onOpenDecisions={() => openProjectSection("decisions", "project-real-target-decisions")}
+        />
+      ) : null}
       {tab === "decisions" ? <ProjectDecisions detail={currentDetail} onOpenFinding={openLinkedFinding} onOpenDecisionReport={props.onOpenDecisionReport} /> : null}
       {tab === "findings" ? (
         <ProjectFindings
@@ -2839,6 +2853,8 @@ function ProjectOverview({
   verifyLocked,
   onVerifyCandidates,
   onOpenReport,
+  onOpenDecisionReport,
+  onOpenDecisions,
 }: {
   detail: ProjectDetail;
   candidates: FindingRow[];
@@ -2846,6 +2862,8 @@ function ProjectOverview({
   verifyLocked: boolean;
   onVerifyCandidates: () => void;
   onOpenReport: (finding: FindingRow) => void;
+  onOpenDecisionReport: (decision: ConfirmDecision) => void;
+  onOpenDecisions: () => void;
 }) {
   const currentRuns = currentMaterialRuns(detail.runs, detail.material);
   const current = currentRuns.find((run) => run.status === "running") ?? currentRuns[0];
@@ -2854,7 +2872,7 @@ function ProjectOverview({
   const runningVerifyProgress = verifyRunProgress(runningVerify);
   const rawPendingVerify = rawPendingVerifyCount(detail.allFindings);
   const verifyRechecksConfirmed = verifyRunRechecksConfirmed(runningVerify, rawPendingVerify, activeFindings(detail.allFindings).length);
-  const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmFindings(detail.allFindings, needsRealTargetConfirmation(detail)).length;
+  const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmFindings(detail.allFindings, needsRealTargetConfirmation(detail), detail.confirmDecisions).length;
   const sourceConfirmed = detail.statusCounts["confirmed-source"] ?? 0;
   const suspectedLeads = detail.statusCounts.suspected ?? 0;
   const needsEvidence = detail.statusCounts["needs-evidence"] ?? 0;
@@ -2872,7 +2890,7 @@ function ProjectOverview({
   const synthesis = runStages(latestRunWithStage(detail, "synthesis")).synthesis;
   const verifyValue = runningVerifyProgress
     ? `${runningVerifyProgress.done}/${runningVerifyProgress.target} checked`
-    : verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : needsEvidence ? plural(needsEvidence, "needs evidence") : "No candidates";
+    : verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : needsEvidence ? `${needsEvidence} need evidence` : "No candidates";
   const verifyDetail = runningVerifyProgress
     ? `${plural(runningVerifyProgress.remaining, "finding")} left in the active Verify run`
     : verifyCount
@@ -2899,24 +2917,27 @@ function ProjectOverview({
     : decisions
       ? `${reproduced}/${decisions} confirm decisions reproduced`
       : "Available after an audit-confirmed finding exists";
-  const candidateTitle = runningVerifyProgress ? "Verification in progress" : verifyCount ? "Candidates to verify" : "Most suspicious bugs";
+  const candidateTitle = runningVerifyProgress ? "Verification in progress" : verifyCount ? "Candidates to verify" : "Prioritized findings";
   const candidateSummary = runningVerifyProgress
     ? `${runningVerifyProgress.done}/${runningVerifyProgress.target} findings checked`
     : verifyCount
     ? `${verifyCount} prioritized ${verifyCount === 1 ? "candidate needs" : "candidates need"} verification`
-    : "No candidate waiting for execution verification";
+    : candidates.length
+      ? `${plural(candidates.length, "prioritized finding")}`
+      : "No finding candidate yet";
   const candidateDetail = runningVerifyProgress
     ? `${plural(runningVerifyProgress.remaining, "finding")} left before Confirm can use the refreshed local results.`
     : verifyCount
     ? "These suspected or source-confirmed findings are the next local verification worklist."
-    : "Highest-ranked dig and synthesis outputs are shown here after local verification.";
+    : "Highest-ranked findings from dig and synthesis are shown here for triage; final submission units are decisions.";
   const candidateCounter = runningVerifyProgress ? `${runningVerifyProgress.done}/${runningVerifyProgress.target}` : candidates.length;
   const candidateEmpty = verifyCount
     ? "Unverified candidates appear here after dig or synthesis."
-    : "Ranked findings appear here after dig audits mapped scopes.";
+    : "Prioritized findings appear here after dig audits mapped scopes.";
   return (
     <>
       {runningRun ? <LiveActivityPanel run={runningRun} /> : null}
+      <ProjectOverviewDecisions decisions={detail.confirmDecisions} onOpenDecisionReport={onOpenDecisionReport} onOpenDecisions={onOpenDecisions} />
       <div id="project-top-candidates" className="section-anchor">
         <Card title={<span>{candidateTitle} <Counter>{candidateCounter}</Counter></span>}>
           <div className="candidate-head">
@@ -2938,11 +2959,87 @@ function ProjectOverview({
             <QueueItem label="Scope coverage" value={scopeValue} detail={scopeDetail} />
             <QueueItem label="Synthesize" value={synthesisValue} detail={synthesisDetail} />
             <QueueItem label="Candidate verification" value={verifyValue} detail={verifyDetail} />
-            <QueueItem label="Real-target proof" value={plural(reproduced, "reproduced finding")} detail={proofDetail} />
+            <QueueItem label="Real-target proof" value={plural(reproduced, "real-target reproduction")} detail={proofDetail} />
           </div>
         </Card>
       </div>
     </>
+  );
+}
+
+function ProjectOverviewDecisions({
+  decisions,
+  onOpenDecisionReport,
+  onOpenDecisions,
+}: {
+  decisions: ConfirmDecision[];
+  onOpenDecisionReport: (decision: ConfirmDecision) => void;
+  onOpenDecisions: () => void;
+}) {
+  if (!decisions.length) return null;
+  const reproduced = confirmedDecisions(decisions).length;
+  const submitCandidates = submitCandidateCount(decisions);
+  const missingReports = pendingDecisionReports(decisions).length;
+  const meta = decisionCalloutMeta(decisions);
+  const preview = overviewDecisionPreview(decisions);
+  const remaining = decisions.length - preview.length;
+  const headline = submitCandidates
+    ? plural(submitCandidates, "submit candidate")
+    : reproduced
+      ? plural(reproduced, "real-target reproduction")
+      : plural(decisions.length, "decision");
+  const detailParts = [
+    plural(decisions.length, "decision"),
+    reproduced ? plural(reproduced, "real-target reproduction") : "",
+    missingReports ? `${plural(missingReports, "formal report")} missing` : "",
+    meta,
+  ].filter(Boolean);
+  return (
+    <div id="project-submission-decisions" className="section-anchor">
+      <Card title={<span>Submission decisions <Counter>{submitCandidates || reproduced || decisions.length}</Counter></span>}>
+        <div className="candidate-head">
+          <div>
+            <strong>{headline}</strong>
+            <small>{detailParts.join(" · ")}</small>
+          </div>
+          <Button size="sm" icon="arrowright" title="Open all decisions" aria-label="Open all decisions" onClick={onOpenDecisions}>
+            All decisions
+          </Button>
+        </div>
+        <div className="decision-list overview-decision-list">
+          {preview.map((decision) => {
+            const metaChips = decisionMetaChips(decision);
+            return (
+              <div className={`decision-row overview-decision-row${isSubmitCandidateDecision(decision) ? " submit-candidate" : ""}`} key={decision.id ?? `${decision.run_id}-${decision.bug}`}>
+                <div className="decision-main">
+                  <span className={`label ${decision.reproduced === "yes" ? "s-confirmed-executable" : decision.reproduced === "no" ? "s-refuted" : "s-suspected"}`}>
+                    {decisionLabel(decision)}
+                  </span>
+                  <strong>{decision.bug}</strong>
+                  {metaChips.length ? (
+                    <div className="decision-meta-chips" aria-label="Decision submission metadata">
+                      {metaChips.map((chip) => (
+                        <span key={`${decision.id}-${chip.label}`} className={chip.className} title={chip.title}>{chip.label}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="decision-actions">
+                  <Button size="sm" icon="file" title={decision.has_report ? "Open submission report" : "Open generated decision report draft"} onClick={() => onOpenDecisionReport(decision)}>
+                    {decision.has_report ? "Submission report" : "Draft report"}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {remaining > 0 ? (
+          <button type="button" className="overview-more-link" onClick={onOpenDecisions}>
+            Show {plural(remaining, "more decision")}
+          </button>
+        ) : null}
+      </Card>
+    </div>
   );
 }
 
@@ -2976,13 +3073,36 @@ function decisionLabel(decision: ConfirmDecision): string {
   return decision.reproduced || "undecided";
 }
 
+function isSubmitCandidateDecision(decision: ConfirmDecision): boolean {
+  return decision.reproduced === "yes" && decision.recommendation === "submit-candidate";
+}
+
+function overviewDecisionPreview(decisions: ConfirmDecision[]): ConfirmDecision[] {
+  const submitCandidates = decisions.filter(isSubmitCandidateDecision);
+  const reproduced = decisions.filter((decision) => decision.reproduced === "yes" && !isSubmitCandidateDecision(decision));
+  const unresolved = decisions.filter((decision) => decision.reproduced !== "yes");
+  return [...submitCandidates, ...reproduced, ...unresolved].slice(0, 5);
+}
+
 function recommendationLabel(decision: ConfirmDecision): string {
   return decision.recommendation ? decision.recommendation.replace(/-/g, " ") : "no recommendation";
 }
 
+function decisionRecommendationLabel(decision: ConfirmDecision): string {
+  const label = recommendationLabel(decision);
+  return label ? `${label[0]?.toUpperCase() ?? ""}${label.slice(1)}` : "No recommendation";
+}
+
+function decisionRecommendationClass(decision: ConfirmDecision): string {
+  const recommendation = badgeToken(decision.recommendation ?? "");
+  if (recommendation === "submit-candidate") return "decision-recommendation-submit";
+  if (recommendation === "drop") return "decision-recommendation-drop";
+  if (recommendation === "needs-human") return "decision-recommendation-needs-human";
+  return "decision-recommendation-neutral";
+}
+
 function decisionMetaLabel(decision: ConfirmDecision): string {
   return [
-    recommendationLabel(decision),
     decision.evidence_level ? decision.evidence_level.replace(/-/g, " ") : "",
   ].filter(Boolean).join(" · ");
 }
@@ -3005,6 +3125,7 @@ function decisionMetaChips(decision: ConfirmDecision): Array<{ label: string; cl
   const severity = decision.severity?.trim();
   const confidence = decision.submission_confidence?.trim();
   return [
+    decision.recommendation ? { label: decisionRecommendationLabel(decision), className: `label decision-recommendation ${decisionRecommendationClass(decision)}`, title: "Submit recommendation" } : null,
     severity ? { label: badgeLabel(severity), className: `severity sev-${badgeToken(severity)}`, title: "Decision severity" } : null,
     confidence ? { label: `${badgeLabel(confidence)} confidence`, className: `label decision-confidence decision-confidence-${badgeToken(confidence)}`, title: "Submission confidence" } : null,
   ].filter((entry): entry is { label: string; className: string; title: string } => Boolean(entry));
@@ -3034,6 +3155,10 @@ function decisionCalloutMeta(decisions: ConfirmDecision[]): string {
     severity ? `max ${severity}` : "",
     confidence ? `confidence ${confidence}` : "",
   ].filter(Boolean).join(" · ");
+}
+
+function submitCandidateCount(decisions: ConfirmDecision[]): number {
+  return decisions.filter(isSubmitCandidateDecision).length;
 }
 
 function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
@@ -3090,7 +3215,7 @@ function ConfirmDecisionsCard({
             const linkedFindings = decisionFindings(decision, findings);
             const metaChips = decisionMetaChips(decision);
             return (
-              <div className="decision-row" key={decision.id ?? `${decision.run_id}-${decision.bug}`}>
+              <div className={`decision-row${decision.recommendation === "submit-candidate" ? " submit-candidate" : ""}`} key={decision.id ?? `${decision.run_id}-${decision.bug}`}>
                 <div className="decision-main">
                   <span className={`label ${decision.reproduced === "yes" ? "s-confirmed-executable" : decision.reproduced === "no" ? "s-refuted" : "s-suspected"}`}>
                     {decisionLabel(decision)}
@@ -3130,6 +3255,7 @@ function ConfirmDecisionsCard({
 
 function RealTargetCallout({ decisions, onOpen }: { decisions: ConfirmDecision[]; onOpen: () => void }) {
   const reproduced = decisions.filter((decision) => decision.reproduced === "yes").length;
+  const submitCandidates = submitCandidateCount(decisions);
   const meta = decisionCalloutMeta(decisions);
   if (!decisions.length) return null;
   return (
@@ -3137,7 +3263,7 @@ function RealTargetCallout({ decisions, onOpen }: { decisions: ConfirmDecision[]
       <span className="dot" />
       <span>
         <strong>{plural(reproduced, "real-target reproduction")}</strong>
-        <small>{plural(decisions.length, "decision")} ready{meta ? ` · ${meta}` : ""}. Open final decision reports.</small>
+        <small>{plural(decisions.length, "decision")} recorded{submitCandidates ? ` · ${plural(submitCandidates, "submit candidate")}` : ""}{meta ? ` · ${meta}` : ""}. Open decision reports.</small>
       </span>
       <Icon name="arrowright" size={14} />
     </button>
@@ -3586,7 +3712,7 @@ function ProjectFindings(props: {
     },
     {
       label: "Confirm",
-      count: verifyRechecksConfirmed ? 0 : pendingConfirmFindings(allFindings, requiresConfirmation).length,
+      count: verifyRechecksConfirmed ? 0 : pendingConfirmFindings(allFindings, requiresConfirmation, props.detail.confirmDecisions).length,
       detail: verifyRechecksConfirmed ? "Waiting for active Verify to refresh local results." : requiresConfirmation ? "Locally verified findings waiting for real-target reproduction." : "Not required for this source-only target.",
     },
     {
@@ -4804,7 +4930,7 @@ function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError 
   const running = currentMaterialRuns(detail.runs, detail.material).find((run) => run.status === "running");
   const pendingScopes = detail.progress.pending ?? 0;
   const requiresConfirmation = needsRealTargetConfirmation(detail);
-  const confirmable = pendingConfirmFindings(detail.allFindings, requiresConfirmation).length;
+  const confirmable = pendingConfirmFindings(detail.allFindings, requiresConfirmation, detail.confirmDecisions).length;
   const verifiable = pendingVerifyFindings(detail.allFindings).length;
   const reportable = requiresConfirmation ? reportableDecisions(detail.confirmDecisions).length : reportableFindings(detail.allFindings, requiresConfirmation).length;
   const missingReports = requiresConfirmation ? pendingDecisionReports(detail.confirmDecisions).length : pendingFormalReports(detail.allFindings, requiresConfirmation).length;
@@ -4893,7 +5019,7 @@ function LaunchConfirmModal({ action, detail, busy, onCancel, onConfirm }: { act
   const requiresConfirmation = needsRealTargetConfirmation(detail);
   const targets = isReport
     ? (requiresConfirmation ? reportDecisionFindings(detail, false) : reportableFindings(detail.allFindings, requiresConfirmation))
-    : isConfirm ? pendingConfirmFindings(detail.allFindings, requiresConfirmation) : pendingVerifyFindings(detail.allFindings);
+    : isConfirm ? pendingConfirmFindings(detail.allFindings, requiresConfirmation, detail.confirmDecisions) : pendingVerifyFindings(detail.allFindings);
   const defaultReportTargets = requiresConfirmation ? reportDecisionFindings(detail, true) : pendingFormalReports(detail.allFindings, requiresConfirmation);
   const defaultTargets = isReport ? (defaultReportTargets.length ? defaultReportTargets : targets) : targets;
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set(defaultTargets.map((finding) => finding.id)));
