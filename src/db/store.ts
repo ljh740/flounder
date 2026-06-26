@@ -12,7 +12,7 @@
 import "./sqlite-quiet.js"; // must run before node:sqlite loads — filters its experimental warning
 import { createRequire } from "node:module";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 // A static `import ... from "node:sqlite"` emits the builtin's ExperimentalWarning at link
@@ -147,7 +147,7 @@ export interface FindingQuery extends FindingFilter {
   offset?: number | undefined;
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -377,7 +377,10 @@ export class MetadataStore {
     }
     this.ensureProjectUuids();
     this.reconcileConfirmStatuses();
-    this.db.prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO NOTHING").run(String(SCHEMA_VERSION));
+    this.runDataMigrations();
+    this.db
+      .prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(String(SCHEMA_VERSION));
   }
 
   private ensureProjectUuids(): void {
@@ -400,6 +403,85 @@ export class MetadataStore {
       for (const member of members) {
         if (typeof member !== "string") continue;
         for (const key of confirmMemberKeys(member)) update.run(outcome, row.project_id, key);
+      }
+    }
+  }
+
+  private runDataMigrations(): void {
+    this.transaction(() => {
+      this.reconcileFindingReportRunIds();
+      this.reconcileRefutedVerifyArtifacts();
+    });
+  }
+
+  private reconcileFindingReportRunIds(): void {
+    const runs = this.db
+      .prepare("SELECT id, project_id, run_dir FROM run WHERE run_dir IS NOT NULL AND run_dir <> ''")
+      .all() as Array<{ id: number; project_id: number; run_dir: string }>;
+    if (runs.length === 0) return;
+
+    const runByDir = new Map<string, number>();
+    for (const run of runs) runByDir.set(reportRunKey(run.project_id, run.run_dir), Number(run.id));
+
+    const findings = this.db
+      .prepare("SELECT id, project_id, run_id, report_path FROM finding WHERE report_path IS NOT NULL AND report_path <> ''")
+      .all() as Array<{ id: number; project_id: number; run_id: number | null; report_path: string }>;
+    if (findings.length === 0) return;
+
+    const update = this.db.prepare("UPDATE finding SET run_id = ?, updated_at = ? WHERE id = ?");
+    const ts = now();
+    for (const finding of findings) {
+      const runId = runByDir.get(reportRunKey(finding.project_id, path.dirname(finding.report_path)));
+      if (runId !== undefined && finding.run_id !== runId) update.run(runId, ts, finding.id);
+    }
+  }
+
+  private reconcileRefutedVerifyArtifacts(): void {
+    const runs = this.db
+      .prepare("SELECT id, project_id, run_dir FROM run WHERE run_dir IS NOT NULL AND run_dir <> ''")
+      .all() as Array<{ id: number; project_id: number; run_dir: string }>;
+    if (runs.length === 0) return;
+
+    const selectOriginal = this.db.prepare("SELECT id, project_id, title, status FROM finding WHERE id = ?");
+    const updateOriginal = this.db.prepare(
+      `UPDATE finding SET run_id = ?, title = ?, location = ?, severity = ?, status = 'refuted',
+         scope_id = COALESCE(?, scope_id),
+         report_markdown = COALESCE(NULLIF(?, ''), report_markdown),
+         description = COALESCE(NULLIF(?, ''), description), evidence = COALESCE(NULLIF(?, ''), evidence),
+         exploit_sketch = COALESCE(NULLIF(?, ''), exploit_sketch), fix = COALESCE(NULLIF(?, ''), fix),
+         confidence = COALESCE(?, confidence), updated_at = ? WHERE id = ? AND project_id = ?`,
+    );
+
+    for (const run of runs) {
+      const artifacts = [
+        ...readFindingArtifact(path.join(run.run_dir, "audit_hypotheses.json")),
+        ...readFindingArtifact(path.join(run.run_dir, "audit_findings.json")),
+      ];
+      for (const artifact of artifacts) {
+        if (!artifactTitleIsRefuted(artifact)) continue;
+        const originId = artifactOriginId(artifact);
+        if (originId === undefined) continue;
+        const original = selectOriginal.get(originId) as { id: number; project_id: number; title: string | null; status: string } | undefined;
+        if (!original || original.project_id !== run.project_id || original.status === "refuted") continue;
+
+        const ts = now();
+        updateOriginal.run(
+          run.id,
+          cleanArtifactTitle(stringValue(artifact.title)) ?? original.title ?? null,
+          stringValue(artifact.location) ?? null,
+          stringValue(artifact.severity) ?? null,
+          stringValue(artifact.scopeId) ?? null,
+          "", // refuted hypotheses do not have a submit-ready report body.
+          stringValue(artifact.description) ?? null,
+          stringValue(artifact.evidence) ?? null,
+          stringValue(artifact.exploitSketch) ?? null,
+          stringValue(artifact.fix) ?? null,
+          numberValue(artifact.confidence),
+          ts,
+          original.id,
+          run.project_id,
+        );
+        this.recordStatusEvent(original.id, original.status, "refuted", "verify artifact migration", run.id, ts);
       }
     }
   }
@@ -1351,6 +1433,56 @@ function parseJsonArray(value: unknown): unknown[] {
   if (typeof value !== "string" || !value.trim()) return [];
   const parsed = jsonParseOrNull(value);
   return Array.isArray(parsed) ? parsed : [];
+}
+
+function readFindingArtifact(filePath: string): Array<Record<string, unknown>> {
+  if (!existsSync(filePath)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+    if (Array.isArray(parsed)) return parsed.filter(isRecord);
+    if (isRecord(parsed)) {
+      for (const key of ["findings", "hypotheses", "items"]) {
+        const value = parsed[key];
+        if (Array.isArray(value)) return value.filter(isRecord);
+      }
+    }
+  } catch {
+    // Corrupt or missing artifacts must not block opening the DB.
+  }
+  return [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function artifactTitleIsRefuted(artifact: Record<string, unknown>): boolean {
+  const title = stringValue(artifact.title);
+  return title !== undefined && /^\s*REFUTED\s*:/i.test(title);
+}
+
+function cleanArtifactTitle(title: string | undefined): string | null {
+  if (!title) return null;
+  const cleaned = title.replace(/^\s*(?:REFUTED|CONFIRMED|DISCHARGED)\s*:\s*/i, "").trim();
+  return cleaned || title.trim() || null;
+}
+
+function artifactOriginId(artifact: Record<string, unknown>): number | undefined {
+  const value = artifact.originId ?? artifact.origin_id;
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function reportRunKey(projectId: number, runDir: string): string {
+  return `${projectId}\0${path.normalize(runDir).replace(/[\\/]+$/, "")}`;
 }
 
 function toProviderProfile(row: Record<string, unknown>): ProviderProfile {

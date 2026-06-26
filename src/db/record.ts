@@ -194,11 +194,20 @@ export class RunRecorder implements RunTracker {
   }
 }
 
-// The DB status is the kernel's confirmationStatus, except a skeptic-disputed finding is
-// surfaced as "refuted" (it is execution-proven but flagged for humans).
+// The DB status is the kernel's confirmationStatus, except a skeptic-disputed finding or a
+// verify-mode REFUTED verdict is surfaced as structured "refuted" state instead of leaving it
+// in the suspected queue with a status prefix embedded in the title.
 function toFindingStatus(finding: AgentFinding): FindingStatus {
-  if (finding.disputed) return "refuted";
+  if (finding.disputed || isRefutedTitle(finding.title)) return "refuted";
   return finding.confirmationStatus as FindingStatus;
+}
+
+function isRefutedTitle(title: string): boolean {
+  return /^\s*REFUTED\s*:/i.test(title);
+}
+
+function stripFindingStatusPrefix(title: string): string {
+  return title.replace(/^\s*(?:REFUTED|CONFIRMED|DISCHARGED)\s*:\s*/i, "").trim() || title.trim();
 }
 
 function isConfirmedLike(status: string): boolean {
@@ -210,14 +219,14 @@ function isConfirmedLike(status: string): boolean {
 // persisted incrementally (per scope, then re-persisted with updated statuses through differential /
 // refutation / appeal). Hashing scope+location+title keeps the SAME row across those updates.
 function stableFindingKey(finding: AgentFinding): string {
-  const key = findingContentKey(finding.scopeId, finding.location, finding.title);
+  const key = findingContentKey(finding.scopeId, finding.location, stripFindingStatusPrefix(finding.title));
   return key === "k0" ? finding.id : key;
 }
 
 export function toFindingRow(finding: AgentFinding, runDir: string, targetName = "Flounder audit target"): FindingRow {
   return {
     findingKey: stableFindingKey(finding),
-    title: finding.title,
+    title: stripFindingStatusPrefix(finding.title),
     location: finding.location,
     severity: finding.severity,
     status: toFindingStatus(finding),
