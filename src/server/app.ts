@@ -810,7 +810,7 @@ async function projectGet(c: Ctx): Promise<void> {
     const auditConfirmedFindings = countAuditConfirmedFindings(activeFindings);
     const confirmDecisions = activePrepareRefresh
       ? []
-      : c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary));
+      : currentConfirmDecisions(c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes").length;
     sendJson(c.res, 200, {
       project,
@@ -948,6 +948,48 @@ function rowBelongsToCurrentMaterial(row: Record<string, unknown>, currentRunIds
   if (!boundary) return true;
   const runId = Number(row.run_id);
   return Number.isFinite(runId) && currentRunIds.has(runId);
+}
+
+function currentConfirmDecisions(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const ranked = rows.map((row, index) => ({ row, index })).sort((a, b) => {
+    const aCreated = stringValue(a.row.created_at);
+    const bCreated = stringValue(b.row.created_at);
+    if (aCreated !== bCreated) return bCreated.localeCompare(aCreated);
+    const aRun = Number(a.row.run_id);
+    const bRun = Number(b.row.run_id);
+    if (Number.isFinite(aRun) && Number.isFinite(bRun) && aRun !== bRun) return bRun - aRun;
+    return a.index - b.index;
+  });
+  const covered = new Set<string>();
+  const kept: Array<Record<string, unknown>> = [];
+  for (const { row } of ranked) {
+    const keys = confirmDecisionMemberKeys(row);
+    if (keys.length > 0 && keys.every((key) => covered.has(key))) continue;
+    kept.push(row);
+    for (const key of keys) covered.add(key);
+  }
+  return kept;
+}
+
+function confirmDecisionMemberKeys(row: Record<string, unknown>): string[] {
+  const members = safeParse(row.members_json);
+  if (!Array.isArray(members)) return [];
+  const keys = new Set<string>();
+  const add = (value: string): void => {
+    const key = value.trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    if (/^k[0-9a-z]+$/.test(key)) keys.add(key);
+  };
+  for (const member of members) {
+    if (typeof member !== "string") continue;
+    const cleaned = member.trim();
+    add(cleaned);
+    add(cleaned.split(/\s+/)[0] ?? "");
+    const bracketed = cleaned.match(/^\[(k[0-9a-z]+)\]/i)?.[1];
+    if (bracketed) add(bracketed);
+    const embedded = cleaned.match(/\b(k[0-9a-z]+)\b/i)?.[1];
+    if (embedded) add(embedded);
+  }
+  return [...keys];
 }
 
 function isScopeInventoryRun(run: Record<string, unknown>): boolean {
@@ -2526,6 +2568,7 @@ function confirmDecisionsList(c: Ctx): void {
     rows = rows
       .filter((row) => includeStale || (!activePrepareRefresh && rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary)))
       .map((row) => annotateConfirmDecisionMaterialStaleness(row, currentResultRunIds, materialBoundary, activePrepareRefresh));
+    if (!includeStale) rows = currentConfirmDecisions(rows);
     if (reproduced) rows = rows.filter((row) => row.reproduced === reproduced);
     sendJson(c.res, 200, { confirmDecisions: rows });
   });
@@ -3267,7 +3310,7 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
     const counts = findingCounts(findings);
     const confirmDecisions = activePrepareRefresh
       ? []
-      : store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary));
+      : currentConfirmDecisions(store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes").length;
     const verifyPendingFindings = (counts.suspected ?? 0) + (counts["confirmed-source"] ?? 0);
     const requiresRealTargetConfirmation = latestPrepareRequiresRealTargetConfirmation(allRuns);

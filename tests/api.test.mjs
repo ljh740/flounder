@@ -451,6 +451,40 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
   });
 });
 
+test("api: current confirm decisions hide older rows superseded by newer member decisions", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "superseded-confirm-decisions", sourcePaths: ["./src"] }));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const oldConfirm = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "old-confirm") });
+      store.upsertConfirmDecisions(created.id, oldConfirm, [
+        { bug: "old setup blocker", reproduced: "could-not-set-up", recommendation: "needs-human", members: ["kabc123"] },
+        { bug: "still unsettled", reproduced: "could-not-set-up", recommendation: "needs-human", members: ["kstill"] },
+      ]);
+      store.finishRun(oldConfirm, "done");
+      const newConfirm = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "new-confirm") });
+      store.upsertConfirmDecisions(created.id, newConfirm, [
+        { bug: "new reproduced result", reproduced: "yes", recommendation: "submit-candidate", members: ["kabc123"] },
+      ]);
+      store.finishRun(newConfirm, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.deepEqual(new Set(detail.confirmDecisions.map((row) => row.bug)), new Set(["new reproduced result", "still unsettled"]));
+    assert.equal(detail.reproducedBugs, 1);
+
+    const current = await json(await fetch(base + `/api/projects/${created.uuid}/confirm-decisions`));
+    assert.deepEqual(new Set(current.confirmDecisions.map((row) => row.bug)), new Set(["new reproduced result", "still unsettled"]));
+
+    const withHistory = await json(await fetch(base + `/api/projects/${created.uuid}/confirm-decisions?includeStale=true`));
+    assert.deepEqual(new Set(withHistory.confirmDecisions.map((row) => row.bug)), new Set(["new reproduced result", "old setup blocker", "still unsettled"]));
+  });
+});
+
 test("api: project prepare reuses prior neutral clue when resolving materials", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
