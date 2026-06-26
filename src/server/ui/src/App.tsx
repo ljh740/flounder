@@ -94,6 +94,9 @@ interface LaunchResult {
 
 const ONLINE_MS = 90_000;
 const RECENT_MS = 24 * 60 * 60 * 1000;
+const READ_WATERMARK_LIMIT = 300;
+const SETUP_READ_WATERMARKS_KEY = "flounder-setup-read-watermarks";
+const ACTIVITY_READ_WATERMARKS_KEY = "flounder-activity-read-watermarks";
 const COVERAGE_MODES = [
   { value: "full", label: "Full - finish every pending scope" },
   { value: "standard", label: "Standard - until 30 audited scopes" },
@@ -106,6 +109,32 @@ type CoverageMode = (typeof COVERAGE_MODES)[number]["value"];
 function initialTheme(): "light" | "dark" {
   const explicit = localStorage.getItem("flounder-theme-explicit") === "1";
   return explicit && localStorage.getItem("flounder-theme") === "dark" ? "dark" : "light";
+}
+
+function readStoredStringMap(key: string): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    );
+  } catch {
+    return {};
+  }
+}
+
+function pruneStringMap(values: Record<string, string>): Record<string, string> {
+  const entries = Object.entries(values).filter(([, value]) => value);
+  return Object.fromEntries(entries.slice(-READ_WATERMARK_LIMIT));
+}
+
+function writeStoredStringMap(key: string, values: Record<string, string>): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(pruneStringMap(values)));
+  } catch {
+    // Ignore storage failures; unread dots still work for the current session.
+  }
 }
 
 function readRoute(): RouteState {
@@ -2411,6 +2440,8 @@ function ProjectDetailView(props: {
   const runningVerifyProgress = verifyRunProgress(runningVerify);
   const hasPipelineRun = detail.runs.some((run) => run.kind === "run");
   const runningInactive = runningRun ? runInactiveLabel(runningRun) : null;
+  const [activityReadWatermarks, setActivityReadWatermarks] = useState<Record<string, string>>(() => readStoredStringMap(ACTIVITY_READ_WATERMARKS_KEY));
+  const [setupReadWatermarks, setSetupReadWatermarks] = useState<Record<string, string>>(() => readStoredStringMap(SETUP_READ_WATERMARKS_KEY));
   const requiresConfirmation = needsRealTargetConfirmation(detail);
   const rawPendingVerify = rawPendingVerifyCount(allFindings);
   const needsEvidenceCount = activeFindings(allFindings).filter((finding) => finding.status === "needs-evidence").length;
@@ -2430,6 +2461,13 @@ function ProjectDetailView(props: {
   const candidateLabel = pendingVerify > 0 ? "to verify" : needsEvidenceCount > 0 ? "need evidence" : "top findings";
   const localVerifySummary = activeVerifySummary(runningVerify) || verifyStatusSummary(allFindings);
   const setupAttention = prepareMaterialsAttention(detail.prepareSummary);
+  const setupAttentionSignature = prepareAttentionSignature(detail.prepareSummary, setupAttention);
+  const setupUnread = Boolean(
+    setupAttention
+    && setupAttentionSignature
+    && tab !== "setup"
+    && setupReadWatermarks[project.uuid] !== setupAttentionSignature
+  );
   const launchLocked = props.busy || Boolean(runningRun);
   const requiredProviders = requiredProviderProfiles(detail, providers);
   const authStatuses = requiredProviders.map((profile) => ({ profile, status: daemonHasProvider(selectedDaemon, profile.provider) }));
@@ -2440,6 +2478,15 @@ function ProjectDetailView(props: {
     .filter((entry) => entry.provider);
   const currentRunningRuns = currentRuns.filter((run) => run.status === "running").length;
   const sourceState = projectSourceState(detail, config.sourcePaths);
+  const activityRunKey = runningRun ? `${project.uuid}:${runningRun.id}` : "";
+  const activityWatermark = runningRun ? (runningRun.last_activity_at ?? runningRun.started_at ?? "") : "";
+  const activityUnread = Boolean(
+    runningRun
+    && activityRunKey
+    && activityWatermark
+    && tab !== "activity"
+    && (activityReadWatermarks[activityRunKey] ?? "") < activityWatermark
+  );
   const openProjectSection = (nextTab: ProjectTab, sectionId?: string) => {
     setTab(nextTab);
     if (sectionId) window.setTimeout(() => scrollToProjectSection(sectionId), 0);
@@ -2452,6 +2499,24 @@ function ProjectDetailView(props: {
   const openSetupTab = () => {
     openProjectSection("setup", "project-setup-tab");
   };
+  useEffect(() => {
+    if (tab !== "activity" || !activityRunKey || !activityWatermark) return;
+    setActivityReadWatermarks((current) => {
+      if (current[activityRunKey] === activityWatermark) return current;
+      const next = pruneStringMap({ ...current, [activityRunKey]: activityWatermark });
+      writeStoredStringMap(ACTIVITY_READ_WATERMARKS_KEY, next);
+      return next;
+    });
+  }, [activityRunKey, activityWatermark, tab]);
+  useEffect(() => {
+    if (tab !== "setup" || !setupAttentionSignature) return;
+    setSetupReadWatermarks((current) => {
+      if (current[project.uuid] === setupAttentionSignature) return current;
+      const next = pruneStringMap({ ...current, [project.uuid]: setupAttentionSignature });
+      writeStoredStringMap(SETUP_READ_WATERMARKS_KEY, next);
+      return next;
+    });
+  }, [project.uuid, setupAttentionSignature, tab]);
   const currentProject: ProjectSnapshot = {
     ...project,
     progress,
@@ -2655,13 +2720,13 @@ function ProjectDetailView(props: {
             role="tab"
             aria-selected={tab === t.id}
             className={tab === t.id ? "sel" : ""}
-            title={t.id === "setup" && setupAttention ? setupAttention.label : t.id === "activity" && runningRun ? `${runKindLabel(runningRun.kind, runningRun)} is running` : undefined}
+            title={t.id === "setup" && setupAttention ? (setupUnread ? setupAttention.label : "Setup attention reviewed") : t.id === "activity" && runningRun ? (activityUnread ? `New activity in ${runKindLabel(runningRun.kind, runningRun)}` : `${runKindLabel(runningRun.kind, runningRun)} is running`) : undefined}
             onClick={() => setTab(t.id)}
           >
             <span>{t.label}</span>
             {t.id === "decisions" && confirmDecisions.length ? <Counter>{confirmDecisions.length}</Counter> : null}
-            {t.id === "activity" && runningRun && tab !== "activity" ? <span className="tab-alert-dot pending" aria-hidden="true" /> : null}
-            {t.id === "setup" && setupAttention ? <span className={`tab-alert-dot ${setupAttention.tone}`} aria-hidden="true" /> : null}
+            {t.id === "activity" && activityUnread ? <span className="tab-alert-dot pending" aria-label="New activity" /> : null}
+            {t.id === "setup" && setupAttention && setupUnread ? <span className={`tab-alert-dot ${setupAttention.tone}`} aria-label="Setup attention" /> : null}
           </button>
         ))}
       </div>
@@ -2675,6 +2740,7 @@ function ProjectDetailView(props: {
           onOpenReport={props.onOpenReport}
           onOpenDecisionReport={props.onOpenDecisionReport}
           onOpenDecisions={() => openProjectSection("decisions", "project-real-target-decisions")}
+          onOpenActivity={() => openProjectSection("activity")}
         />
       ) : null}
       {tab === "decisions" ? <ProjectDecisions detail={currentDetail} onOpenFinding={openLinkedFinding} onOpenDecisionReport={props.onOpenDecisionReport} /> : null}
@@ -2719,6 +2785,26 @@ function prepareMaterialsAttention(summary?: PrepareSummary | null): { tone: "wa
       ? `Prepared materials need repair: ${plural(count, "issue")}`
       : `Prepared materials need attention: ${plural(count, "issue")}`,
   };
+}
+
+function prepareAttentionSignature(summary: PrepareSummary | null | undefined, attention: { tone: "warn" | "pending"; label: string } | null): string {
+  if (!summary || !attention) return "";
+  return JSON.stringify({
+    tone: attention.tone,
+    label: attention.label,
+    runId: summary.runId ?? null,
+    status: summary.status ?? null,
+    quality: summary.quality ?? null,
+    auditReady: summary.auditReady ?? null,
+    blocked: summary.blocked ?? null,
+    manifestStatus: summary.manifestStatus ?? null,
+    manifestState: summary.manifestState ?? null,
+    blockingIssues: summary.blockingIssues ?? [],
+    caveats: summary.caveats ?? [],
+    gaps: summary.gaps ?? [],
+    issues: summary.issues ?? [],
+    realTargetIssues: summary.realTarget?.issues ?? [],
+  });
 }
 
 function uniqueText(values: string[]): string[] {
@@ -2855,6 +2941,7 @@ function ProjectOverview({
   onOpenReport,
   onOpenDecisionReport,
   onOpenDecisions,
+  onOpenActivity,
 }: {
   detail: ProjectDetail;
   candidates: FindingRow[];
@@ -2864,6 +2951,7 @@ function ProjectOverview({
   onOpenReport: (finding: FindingRow) => void;
   onOpenDecisionReport: (decision: ConfirmDecision) => void;
   onOpenDecisions: () => void;
+  onOpenActivity: () => void;
 }) {
   const currentRuns = currentMaterialRuns(detail.runs, detail.material);
   const current = currentRuns.find((run) => run.status === "running") ?? currentRuns[0];
@@ -2936,7 +3024,7 @@ function ProjectOverview({
     : "Prioritized findings appear here after dig audits mapped scopes.";
   return (
     <>
-      {runningRun ? <LiveActivityPanel run={runningRun} /> : null}
+      {runningRun ? <ActivitySnapshot run={runningRun} onOpen={onOpenActivity} /> : null}
       <ProjectOverviewDecisions decisions={detail.confirmDecisions} onOpenDecisionReport={onOpenDecisionReport} onOpenDecisions={onOpenDecisions} />
       <div id="project-top-candidates" className="section-anchor">
         <Card title={<span>{candidateTitle} <Counter>{candidateCounter}</Counter></span>}>
@@ -3051,6 +3139,35 @@ function ProjectDecisions({ detail, onOpenFinding, onOpenDecisionReport }: { det
       onOpenFinding={onOpenFinding}
       onOpenDecisionReport={onOpenDecisionReport}
     />
+  );
+}
+
+function ActivitySnapshot({ run, onOpen }: { run: RunRow; onOpen: () => void }) {
+  const inactive = runInactiveLabel(run);
+  const lastActivity = run.last_activity_at ? fmtTime(run.last_activity_at) : "";
+  const status = inactive
+    ? `No activity for ${inactive}`
+    : lastActivity
+      ? `Last update ${lastActivity}`
+      : run.status === "running"
+        ? "Waiting for first event"
+        : "No activity recorded";
+  return (
+    <Card>
+      <button type="button" className="activity-snapshot" onClick={onOpen}>
+        <span className={`activity-snapshot-dot${run.status === "running" && !inactive ? " live" : inactive ? " warn" : ""}`} />
+        <span className="activity-snapshot-main">
+          <span className="section-title inline">Live activity</span>
+          <strong>{runKindLabel(run.kind, run)}</strong>
+          <small>Run #{run.id} · {runProgress(run, [])}</small>
+        </span>
+        <span className="activity-snapshot-side">
+          <small>{status}</small>
+          <span>Open activity</span>
+        </span>
+        <Icon name="arrowright" size={14} />
+      </button>
+    </Card>
   );
 }
 
@@ -3303,8 +3420,9 @@ function prepareMatchBadge(match?: string): { label: string; className: string; 
 }
 
 function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
+  const [expanded, setExpanded] = useState(false);
   const components = summary.components ?? [];
-  const visibleComponents = components.slice(0, 6);
+  const visibleComponents = expanded ? components : components.slice(0, 6);
   const hiddenComponents = Math.max(0, components.length - visibleComponents.length);
   const { blockingIssues, caveats } = prepareIssueBuckets(summary);
   const hasOnlyBenignFirewallBlockers = (summary.blockingIssues?.length ?? 0) > 0 && blockingIssues.length === 0;
@@ -3387,7 +3505,11 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
                 </div>
               );
             })}
-            {hiddenComponents ? <div className="prepare-component prepare-component-more">+{hiddenComponents} more components</div> : null}
+            {components.length > 6 ? (
+              <button type="button" className="prepare-component prepare-component-more" onClick={() => setExpanded((value) => !value)}>
+                {expanded ? "Show fewer components" : `Show +${hiddenComponents} more components`}
+              </button>
+            ) : null}
           </div>
         ) : (
           <EmptyInline>No prepared components have been reported yet.</EmptyInline>

@@ -1577,7 +1577,7 @@ small {
 
 .prepare-component {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   border: 1px solid var(--border);
@@ -1585,6 +1585,13 @@ small {
   padding: 8px 10px;
   background: var(--canvas-subtle);
   min-width: 0;
+}
+
+.prepare-component .label {
+  max-width: 132px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .prepare-component > div {
@@ -1604,11 +1611,23 @@ small {
 }
 
 .prepare-component-more {
+  grid-column: 1 / -1;
   min-height: 48px;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
   color: var(--fg-muted);
   font-weight: 650;
+  font: inherit;
+  cursor: pointer;
+}
+
+.prepare-component-more:hover,
+.prepare-component-more:focus-visible {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+  background: var(--sel-bg);
 }
 
 .prepare-details {
@@ -1929,6 +1948,72 @@ small {
 
 .activity-empty span {
   font-size: 13px;
+}
+
+.activity-snapshot {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-snapshot:hover .activity-snapshot-side span,
+.activity-snapshot:focus-visible .activity-snapshot-side span {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.activity-snapshot-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--fg-subtle);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--fg-subtle) 12%, transparent);
+}
+
+.activity-snapshot-dot.live {
+  background: var(--success);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 14%, transparent);
+}
+
+.activity-snapshot-dot.warn {
+  background: var(--warning);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 16%, transparent);
+}
+
+.activity-snapshot-main,
+.activity-snapshot-side {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.activity-snapshot-main strong {
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.activity-snapshot-main small,
+.activity-snapshot-side small {
+  color: var(--fg-muted);
+}
+
+.activity-snapshot-side {
+  justify-items: end;
+  text-align: right;
+}
+
+.activity-snapshot-side span {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .candidate-list,
@@ -3892,6 +3977,16 @@ small {
 
   .activity-connection {
     justify-self: flex-start;
+  }
+
+  .activity-snapshot {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .activity-snapshot-side {
+    grid-column: 2 / -1;
+    justify-items: start;
+    text-align: left;
   }
 
   .activity-entry {
