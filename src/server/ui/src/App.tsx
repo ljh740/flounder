@@ -2848,6 +2848,7 @@ function ProjectOverview({
     : verifyCount
     ? "These suspected or source-confirmed findings are the next local verification worklist."
     : "Highest-ranked dig and synthesis outputs are shown here after local verification.";
+  const candidateCounter = runningVerifyProgress ? `${runningVerifyProgress.done}/${runningVerifyProgress.target}` : candidates.length;
   const candidateEmpty = verifyCount
     ? "Unverified candidates appear here after dig or synthesis."
     : "Ranked findings appear here after dig audits mapped scopes.";
@@ -2855,7 +2856,7 @@ function ProjectOverview({
     <>
       {runningRun ? <LiveActivityPanel run={runningRun} /> : null}
       <div id="project-top-candidates" className="section-anchor">
-        <Card title={<span>{candidateTitle} <Counter>{candidates.length}</Counter></span>}>
+        <Card title={<span>{candidateTitle} <Counter>{candidateCounter}</Counter></span>}>
           <div className="candidate-head">
             <div>
               <strong>{candidateSummary}</strong>
