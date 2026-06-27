@@ -11,5 +11,14 @@ test("cli help lists verify alias and project report regeneration", async () => 
   const { stdout } = await execFileAsync(process.execPath, [path.join(root, "dist/cli.js"), "--help"], { cwd: root });
   assert.match(stdout, /flounder verify\s+<file> --source <paths\.\.\.>/);
   assert.match(stdout, /flounder report\s+--project <uuid\|name> \[--finding <id>\.\.\.\] \[--all\]/);
+  assert.match(stdout, /flounder continue\s+--project <uuid\|name>/);
   assert.match(stdout, /Without --finding\/--all,\s+report generates only missing reports/);
+  assert.match(stdout, /same as the UI Continue button/);
+});
+
+test("cli continue has command-specific help", async () => {
+  const { stdout } = await execFileAsync(process.execPath, [path.join(root, "dist/cli.js"), "continue", "--help"], { cwd: root });
+  assert.match(stdout, /flounder continue --project <uuid\|name>/);
+  assert.match(stdout, /verb:"run"/);
+  assert.match(stdout, /--coverage <mode>/);
 });

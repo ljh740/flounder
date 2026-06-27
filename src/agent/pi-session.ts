@@ -36,6 +36,54 @@ export function isPiSessionProvider(provider: string): boolean {
   }
 }
 
+const DEFAULT_FINALIZE_PROMPT_TIMEOUT_MS = 600_000;
+
+export function resolveFinalizePromptTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.FLOUNDER_FINALIZE_PROMPT_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_FINALIZE_PROMPT_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_FINALIZE_PROMPT_TIMEOUT_MS;
+  return Math.max(1, Math.floor(parsed));
+}
+
+export async function promptWithWallClockAbort(
+  session: { prompt: (message: string) => Promise<unknown>; abort: () => unknown },
+  prompt: string,
+  timeoutMs: number,
+): Promise<"completed" | "timed-out"> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    await session.prompt(prompt);
+    return "completed";
+  }
+
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const promptRun = session.prompt(prompt).then(
+    () => "completed" as const,
+    (error: unknown) => {
+      if (timedOut) return "timed-out" as const;
+      throw error;
+    },
+  );
+  const timeoutRun = new Promise<"timed-out">((resolve) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      try {
+        void session.abort();
+      } catch {
+        // best-effort; the timeout still releases the driver
+      }
+      resolve("timed-out");
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promptRun, timeoutRun]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 export async function runAuditSession(input: {
   cfg: AuditorConfig;
   ctx: ToolContext;
@@ -117,6 +165,7 @@ export async function runAuditSession(input: {
   // a 60-turn run). After the main budget is spent we grant a few extra turns and
   // explicitly ask for the artifact the model already has the material to produce.
   const MAX_FINALIZE_TURNS = 3;
+  const finalizePromptTimeoutMs = resolveFinalizePromptTimeoutMs();
   let turns = 0;
   let budgetAborted = false;
   let finalizing = false;
@@ -196,12 +245,16 @@ export async function runAuditSession(input: {
   // status without a passing test.
   const finalizeIfEmpty = async (): Promise<void> => {
     if (finalizing) return;
+    const runFinalizePrompt = async (prompt: string, timeoutEventKind: string): Promise<void> => {
+      const result = await promptWithWallClockAbort(session, prompt, finalizePromptTimeoutMs);
+      if (result === "timed-out") await input.logger.event(timeoutEventKind, { timeoutMs: finalizePromptTimeoutMs });
+    };
     if (input.prepare) {
       if (hasScratch("prepare_manifest.json")) return;
       finalizing = true;
       await input.logger.event("audit_prepare_finalize", { reason: "no prepare_manifest.json before stop" });
       try {
-        await session.prompt(PREPARE_FINALIZE_PROMPT);
+        await runFinalizePrompt(PREPARE_FINALIZE_PROMPT, "audit_prepare_finalize_timeout");
       } catch {
         // best-effort
       }
@@ -213,7 +266,7 @@ export async function runAuditSession(input: {
       finalizing = true;
       await input.logger.event("audit_confirm_finalize", { reason: "no confirm_decision.json before stop" });
       try {
-        await session.prompt(CONFIRM_FINALIZE_PROMPT);
+        await runFinalizePrompt(CONFIRM_FINALIZE_PROMPT, "audit_confirm_finalize_timeout");
       } catch {
         // best-effort
       }
@@ -227,7 +280,7 @@ export async function runAuditSession(input: {
       for (let attempt = 1; attempt <= 3 && missing.length > 0; attempt += 1) {
         await input.logger.event("audit_report_finalize", { reason: "missing required report markdown", attempt, missing });
         try {
-          await session.prompt(buildReportFinalizePrompt(input.report, missing));
+          await runFinalizePrompt(buildReportFinalizePrompt(input.report, missing), "audit_report_finalize_timeout");
         } catch {
           // best-effort
         }
@@ -241,7 +294,7 @@ export async function runAuditSession(input: {
       finalizing = true;
       await input.logger.event("audit_map_finalize", { reason: "no scopes written before stop" });
       try {
-        await session.prompt(MAP_FINALIZE_PROMPT);
+        await runFinalizePrompt(MAP_FINALIZE_PROMPT, "audit_map_finalize_timeout");
       } catch {
         // best-effort: an abort during the finalize turns is expected
       }
@@ -252,7 +305,7 @@ export async function runAuditSession(input: {
     finalizing = true;
     await input.logger.event("audit_findings_finalize", { reason: "no findings written before stop" });
     try {
-      await session.prompt(FINDINGS_FINALIZE_PROMPT);
+      await runFinalizePrompt(FINDINGS_FINALIZE_PROMPT, "audit_findings_finalize_timeout");
     } catch {
       // best-effort
     }

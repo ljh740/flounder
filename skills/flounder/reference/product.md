@@ -33,9 +33,10 @@ New dashboard projects should capture:
 - source paths, build root, corpus paths, and coverage/budget settings.
 
 Use **Run** before the first pipeline run and **Continue** after one exists.
-Use More actions for Prepare, Map, Dig, Verify, Confirm, and Report when the
-user asks for a precise phase. Leave **Run after create** checked when immediate
-execution is wanted.
+The CLI equivalent of the Continue button is
+`flounder continue --project <uuid|name>`. Use More actions for Prepare, Map,
+Dig, Verify, Confirm, and Report when the user asks for a precise phase. Leave
+**Run after create** checked when immediate execution is wanted.
 
 Project list behavior:
 

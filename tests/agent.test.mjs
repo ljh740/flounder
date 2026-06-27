@@ -17,7 +17,7 @@ import { runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
-import { buildSessionPrompt, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, toolSchemas } from "../dist/agent/pi-session.js";
+import { buildSessionPrompt, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 import { renderDisclosure } from "../dist/reports/disclosure.js";
@@ -116,6 +116,33 @@ test("pi session preserves the configured xhigh thinking level", () => {
   assert.equal(mapThinkingLevel("off"), "off");
   assert.equal(mapThinkingLevel("minimal"), "minimal");
   assert.equal(mapThinkingLevel("xhigh"), "xhigh");
+});
+
+test("pi forced-finalize prompt has a wall-clock abort", async () => {
+  assert.equal(resolveFinalizePromptTimeoutMs({ FLOUNDER_FINALIZE_PROMPT_TIMEOUT_MS: "7" }), 7);
+
+  let aborted = false;
+  const stalled = {
+    prompt: async () => new Promise(() => {}),
+    abort: () => {
+      aborted = true;
+    },
+  };
+  const started = Date.now();
+  const result = await promptWithWallClockAbort(stalled, "write findings.json", 5);
+  assert.equal(result, "timed-out");
+  assert.equal(aborted, true);
+  assert.ok(Date.now() - started < 500, "test helper should not wait for the stalled prompt");
+
+  let completedAbort = false;
+  const completed = await promptWithWallClockAbort({
+    prompt: async () => undefined,
+    abort: () => {
+      completedAbort = true;
+    },
+  }, "write findings.json", 1_000);
+  assert.equal(completed, "completed");
+  assert.equal(completedAbort, false);
 });
 
 test("map checkpoint guard blocks further exploration until scopes.json exists", () => {

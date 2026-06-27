@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { defaultConfig, defaultOutputDir, defaultWorkspaceDir, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
 import { CLI_CONFIG_KEYS, configFilePath, getCliConfigValue, isCliConfigKey, loadCliConfig, setCliConfigValue, unsetCliConfigValue, type CliConfigKey } from "./config-file.js";
 import { launchProjectRunViaApi, launchViaApi, ran, resolveServer, fetchArtifact } from "./cli-client.js";
+import { buildProjectContinueBody } from "./cli-project.js";
 import { deriveScopeNote } from "./scope-note.js";
 import type { LaunchSpec } from "./server/run-manager.js";
 import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/history.js";
@@ -113,6 +114,21 @@ async function main(argv: string[]): Promise<void> {
     if (rest.includes("--all")) body.regenerateReports = true;
     const maxSteps = readIntFlag(rest, "--max-steps");
     if (maxSteps !== undefined) body.maxSteps = maxSteps;
+    const run = await launchProjectRunViaApi(resolveServer(readFlag(rest, "--server")), project, body);
+    if (!ran(run)) process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === "continue") {
+    if (rest[0] === "help" || rest.includes("--help") || rest.includes("-h")) {
+      printContinueHelp();
+      return;
+    }
+    // CLI equivalent of the UI's primary Continue button. The project endpoint owns the
+    // prepare-if-needed -> map/dig -> verify -> confirm -> report worklist and resume rules.
+    const project = readFlag(rest, "--project") ?? readFlag(rest, "--project-uuid") ?? firstPositional(rest);
+    if (!project) throw new Error("flounder continue needs --project <uuid|name> (or a project uuid/name positional argument)");
+    const body = buildProjectContinueBody(rest);
     const run = await launchProjectRunViaApi(resolveServer(readFlag(rest, "--server")), project, body);
     if (!ran(run)) process.exitCode = 1;
     return;
@@ -697,7 +713,8 @@ function firstPositional(args: string[]): string | undefined {
     "--max-steps", "--map-steps", "--dig-steps", "--max-scopes", "--dig-samples",
     "--dig-concurrency", "--scope", "--scope-note", "--max-tokens", "--repro-timeout-ms",
     "--sandbox-backend", "--sandbox-image", "--prepare-network", "--confirm-network",
-    "--sandbox-memory-mb", "--sandbox-cpus", "--prepare-timeout-ms",
+    "--sandbox-memory-mb", "--sandbox-cpus", "--prepare-timeout-ms", "--scope-coverage-mode",
+    "--coverage",
   ]);
   for (let i = 0; i < args.length; i += 1) {
     const token = args[i];
@@ -975,6 +992,7 @@ Usage:
   flounder verify  <file> --source <paths...>                                     alias for audit --verify: confirm/refute suspected findings locally
   flounder confirm <run-dir> --source <paths...>                                  open-world: reproduce a run's findings on the real target
   flounder report  --project <uuid|name> [--finding <id>...] [--all]              generate missing reports or regenerate selected/all formal reports
+  flounder continue --project <uuid|name>                                         continue the stored project pipeline (same as the UI Continue button)
   flounder history import-run --target <name> --run <dir>
   flounder server project list                                                   list tracked projects
   flounder server run list [--project <name>]                                    list run history globally or for one project
@@ -1078,6 +1096,13 @@ flounder report:
   --finding <id>          regenerate one selected report; repeat or use comma-separated ids.
   --all                   regenerate all current reportable findings. Without --finding/--all,
                           report generates only missing reports.
+
+flounder continue:
+  --project <uuid|name>   tracked UI/API project. Names are resolved client-side when unique.
+  --verify-from-start     re-run Verify from the beginning instead of only pending candidates.
+  --remap                 re-enumerate scopes from scratch before digging.
+  --coverage <mode>       focused|standard|half|full|custom one-off coverage mode.
+  --max-scopes <n>        one-off scope cap, or custom target when --coverage custom.
 `);
 }
 
@@ -1097,6 +1122,34 @@ Options:
 
 flounder ui starts the REST API, SQLite tracking store, dashboard, and by default a local
 execution daemon. Target code and provider credentials stay on the daemon machine.`);
+}
+
+function printContinueHelp(): void {
+  console.log(`flounder continue — continue a tracked project pipeline.
+
+Usage:
+  flounder continue --project <uuid|name> [options]
+  flounder continue <uuid|name> [options]
+
+This is the CLI equivalent of the UI Continue button. It queues project work with
+verb:"run", so the control plane decides the next phase from stored project state:
+prepare if needed, map/dig pending scopes, verify pending claims, confirm pending
+real-target findings, and generate missing reports.
+
+Options:
+  --project <uuid|name>     tracked UI/API project; names are allowed when unique
+  --verify-from-start       re-run Verify from the beginning instead of only pending candidates
+  --remap                   re-enumerate scopes from scratch before digging
+  --quick                   single breadth pass instead of map -> dig
+  --coverage <mode>         focused|standard|half|full|custom one-off coverage mode
+  --max-scopes <n>          one-off scope cap, or custom target when --coverage custom
+  --map-steps <n>           one-off map turn cap
+  --dig-steps <n>           one-off per-scope dig turn cap
+  --max-steps <n>           one-off global turn cap
+  --dig-samples <n>         one-off samples per scope
+  --dig-concurrency <n>     one-off parallel scopes
+  --mock-llm                use the deterministic mock model on the daemon
+  --server <url>            control plane URL`);
 }
 
 main(process.argv.slice(2)).catch((error: unknown) => {

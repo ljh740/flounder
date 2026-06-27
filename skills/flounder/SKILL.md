@@ -316,7 +316,15 @@ prerequisite for local sealed audit.
 ### Continue An Existing Project
 
 1. Resolve the project UUID from `GET /api/projects`.
-2. Use the project **Continue** action or:
+2. Use the project **Continue** action, or from the CLI:
+
+   ```bash
+   flounder continue --project <uuid|name>
+   ```
+
+   This is the same project pipeline action as the UI Continue button; it queues
+   `verb:"run"` and lets the control plane continue from stored project state.
+3. If shelling through the REST API directly, use:
 
    ```bash
    curl -X POST http://127.0.0.1:4500/api/projects/<uuid>/runs \
@@ -324,7 +332,7 @@ prerequisite for local sealed audit.
      -d '{"verb":"run"}'
    ```
 
-3. If many mapped scopes are pending, prefer continuing coverage before drawing
+4. If many mapped scopes are pending, prefer continuing coverage before drawing
    a negative conclusion.
 
 ### Project Setup And Housekeeping

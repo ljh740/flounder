@@ -1,5 +1,5 @@
 // The CLI as a thin client of the control plane. A `flounder run|map|audit|verify|confirm|prepare|report`
-// (without --local/--mock-llm) builds a launch spec, POSTs it to the control plane, and then
+// builds a launch spec, POSTs it to the control plane, and then
 // FOLLOWS the run the daemon executes — so every CLI run is tracked and visible in the UI
 // exactly like a UI-launched one, and the API is the single entry point. Execution never
 // happens here; if no control plane is reachable we say so and let the user start one
@@ -40,7 +40,7 @@ class ControlPlaneDownError extends Error {
       `no flounder control plane at ${server} (${detail}).\n` +
         `  Start one:         flounder ui                         (control plane + a co-located executor daemon)\n` +
         `  Or point the CLI:  --server <url>  ·  FLOUNDER_SERVER=<url>  ·  flounder config set server <url>\n` +
-        `  Or run in-process: add --local (real run, no server) or --mock-llm (offline)`,
+        `  Offline mock only: --mock-llm still requires a control plane; start flounder ui first.`,
     );
     this.name = "ControlPlaneDownError";
   }
