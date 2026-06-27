@@ -47,9 +47,9 @@ provider entry into `~/.flounder/agent/auth.json` on login/check.
 
 CLI naming convention:
 
-- Workflow verbs stay top-level: `flounder run`, `flounder map`,
-  `flounder audit`, `flounder verify`, `flounder confirm`, and
-  `flounder report`.
+- Workflow verbs stay top-level: `flounder run`, `flounder continue`,
+  `flounder map`, `flounder audit`, `flounder verify`,
+  `flounder confirm`, and `flounder report`.
 - Server/control-plane resource commands live under `flounder server ...`.
 - `flounder daemon ...` commands run on the daemon machine and can touch local
   provider auth, workspace paths, and executor settings. Start executors with
@@ -66,6 +66,7 @@ CLI naming convention:
 | --- | --- |
 | `flounder prepare <clue>` | Open-world acquisition before map: tx/address/project/repo/link -> staged source, corpus, dependency closure, and deployment match |
 | `flounder run <clue>` | One-command pipeline: prepare -> sealed map/dig -> confirm -> report unless disabled |
+| `flounder continue --project <uuid\|name>` | Continue a stored project pipeline; CLI equivalent of the UI Continue button |
 | `flounder run --source <paths...> --target <name>` | Source-provided sealed audit: map -> dig |
 | `flounder map --target <name> --source <paths...>` | Enumerate and persist scope inventory only |
 | `flounder audit <region> --source ...` | Deep-audit one region |
