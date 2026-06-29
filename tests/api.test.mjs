@@ -749,10 +749,22 @@ test("api: run launch does not reuse killed prepared workspace", async () => {
       }),
     );
 
+    const staleRunDir = path.join(out, "killed-prepared-workspace-stale-run");
+    await mkdir(path.join(staleRunDir, "audit", "workspace"), { recursive: true });
+    await writeFile(
+      path.join(staleRunDir, "audit", "workspace", "scopes.json"),
+      JSON.stringify([
+        { id: "S1", title: "old pending scope 1", region: "src/Old.sol:1-10", status: "pending", score: 100 },
+        { id: "S2", title: "old pending scope 2", region: "src/Old.sol:11-20", status: "pending", score: 80 },
+      ]),
+    );
+
     const store = MetadataStore.openForOutput(out);
     try {
       const prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
       store.finishRun(prepareRun, "killed");
+      const staleRun = store.startRun({ projectId: created.id, kind: "run", runDir: staleRunDir, provider: "openai-codex", model: "gpt-5.5" });
+      store.finishRun(staleRun, "killed");
     } finally {
       store.close();
     }
@@ -769,6 +781,8 @@ test("api: run launch does not reuse killed prepared workspace", async () => {
     const spec = JSON.parse(job.spec_json);
 
     assert.equal(spec.pipeline, true);
+    assert.equal(spec.coverageMode, "full");
+    assert.equal(spec.maxScopes, undefined);
     assert.deepEqual(spec.sourcePaths, []);
     assert.equal(spec.buildRoot, undefined);
     assert.equal(spec.clue, "fresh official source clue");

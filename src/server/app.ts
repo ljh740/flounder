@@ -1938,6 +1938,8 @@ async function runLaunch(c: Ctx): Promise<void> {
       spec.buildRoot = prepared.workspaceDir;
       spec.clue = undefined;
       if (!spec.scopeNote && prepared.scopeNote) spec.scopeNote = prepared.scopeNote;
+    } else if (spec.clue && spec.coverageMode === "full") {
+      spec.maxScopes = undefined;
     }
   } else if (spec.verb === "prepare") {
     applyProjectPrepareDefaults(spec, project, runs);
