@@ -676,16 +676,15 @@ test("api: verify launch rejects findings produced before a newer prepare run", 
   });
 });
 
-test("api: verify launch treats killed newer prepare as material drift", async () => {
+test("api: verify launch ignores killed newer prepare as material drift", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    const created = await json(await post("/api/projects", { name: "verify-killed-material-drift", sourcePaths: ["./src"] }));
+    const created = await json(await post("/api/projects", { name: "verify-killed-material-current", sourcePaths: ["./src"] }));
     const store = MetadataStore.openForOutput(out);
-    let prepareRun;
     let findingId;
     try {
-      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "verify-killed-material-drift-audit") });
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "verify-killed-material-current-audit") });
       store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", auditRun);
       store.upsertFindings(created.id, auditRun, [
         {
@@ -697,19 +696,82 @@ test("api: verify launch treats killed newer prepare as material drift", async (
         },
       ]);
       findingId = Number(store.listFindings(created.id)[0].id);
-      prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "verify-killed-material-drift-prepare") });
+      const prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "verify-killed-material-current-prepare") });
       store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-02T00:00:00.000Z", prepareRun);
       store.finishRun(prepareRun, "killed");
     } finally {
       store.close();
     }
 
-    const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "audit", verifyFindings: [{ id: findingId }] });
-    assert.equal(rejected.status, 409);
-    const rejectedBody = await json(rejected);
-    assert.equal(rejectedBody.materialDrift, true);
-    assert.equal(rejectedBody.findings[0].findingId, findingId);
-    assert.equal(rejectedBody.findings[0].prepareRunId, prepareRun);
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "audit", verifyFindings: [{ id: findingId }] }));
+    assert.equal(launched.queued, true);
+    const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
+    const spec = JSON.parse(job.spec_json);
+    assert.equal(spec.verifyFindings[0].originId, findingId);
+  });
+});
+
+test("api: run launch does not reuse killed prepared workspace", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", {
+      name: "killed-prepared-workspace",
+      config: { prepareClue: "fresh official source clue" },
+    }));
+    const runDir = path.join(out, "killed-prepared-workspace-prepare");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(path.join(workspace, "src"), { recursive: true });
+    await writeFile(path.join(workspace, "src", "Target.sol"), "contract Target {}\n");
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "done",
+        clue: "stale killed prepare clue",
+        posture: "blind",
+        answer_firewall: "clean",
+        real_target: {
+          requires_confirmation: false,
+          mode: "source-only",
+          reason: "fixture source only",
+          ground_truth: [],
+        },
+        components: [
+          {
+            identity: "Target",
+            platform: "github",
+            revision: "abc123",
+            staged_path: "src/Target.sol",
+            in_scope: true,
+            match: "n/a-source-only-pinned",
+          },
+        ],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
+      store.finishRun(prepareRun, "killed");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.equal(detail.prepareSummary.status, "killed");
+    assert.equal(detail.prepareSummary.auditReady, false);
+    assert.equal(detail.prepareSummary.blocked, true);
+    assert.equal(detail.material.currentPrepareRunId, null);
+
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run" }));
+    assert.equal(launched.queued, true);
+    const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
+    const spec = JSON.parse(job.spec_json);
+
+    assert.equal(spec.pipeline, true);
+    assert.deepEqual(spec.sourcePaths, []);
+    assert.equal(spec.buildRoot, undefined);
+    assert.equal(spec.clue, "fresh official source clue");
   });
 });
 
@@ -1507,8 +1569,9 @@ test("api: project detail summarizes the latest prepare manifest and workspace q
     );
 
     const store = MetadataStore.openForOutput(out);
+    let prepareRunId;
     try {
-      store.startRun({
+      prepareRunId = store.startRun({
         projectId: created.id,
         kind: "prepare",
         runDir,
@@ -1545,6 +1608,13 @@ test("api: project detail summarizes the latest prepare manifest and workspace q
     const artifactJson = JSON.parse(await artifact.text());
     assert.equal(artifactJson.scope_declaration, "First-party source and official docs only.");
     assert.equal(artifactJson.components.length, 1);
+
+    const finishedStore = MetadataStore.openForOutput(out);
+    try {
+      finishedStore.finishRun(prepareRunId, "done");
+    } finally {
+      finishedStore.close();
+    }
 
     const launched = await json(await post(projectPath + "/runs", { verb: "run" }));
     assert.equal(launched.queued, true);

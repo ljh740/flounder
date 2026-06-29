@@ -881,7 +881,11 @@ function emptyProgress(): Coverage {
 }
 
 function latestPrepareRun(runs: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
-  return runs.find((entry) => entry.kind === "prepare" && typeof entry.started_at === "string");
+  return runs.find(isSuccessfulPrepareRun);
+}
+
+function isSuccessfulPrepareRun(entry: Record<string, unknown>): boolean {
+  return entry.kind === "prepare" && entry.status === "done" && typeof entry.started_at === "string";
 }
 
 function latestScopeInventoryBoundaryRun(runs: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
@@ -1370,6 +1374,10 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
 
   const rawManifestState = stringValue(manifest?.status);
   const runStatus = stringValue(run.status);
+  const unsuccessfulTerminalPrepare = Boolean(runStatus && runStatus !== "running" && runStatus !== "done");
+  if (unsuccessfulTerminalPrepare) {
+    issues.push(`prepare run ended with status ${runStatus}; staged materials are not reusable until Prepare completes successfully`);
+  }
 
   const posture = stringValue(manifest?.posture);
   const answerFirewall = describeAnswerFirewall(manifest?.answer_firewall, posture);
@@ -1464,6 +1472,7 @@ function isBlockingPrepareIssue(issue: string): boolean {
     || raw.includes("prepare_manifest.json is not a json object")
     || raw.includes("manifest lists no components")
     || raw.includes("prepared workspace is empty")
+    || raw.includes("prepare run ended with status")
     || raw.includes("answer firewall is");
 }
 
@@ -2058,7 +2067,7 @@ function verifyMaterialDrift(store: MetadataStore, projectId: number, verifyFind
     const runId = Number(finding.run_id);
     if (!Number.isFinite(runId)) continue;
     const newerPrepare = store.latestPrepareAfterRun(projectId, runId);
-    if (!newerPrepare) continue;
+    if (!newerPrepare || !isSuccessfulPrepareRun(newerPrepare)) continue;
     drifted.push({
       findingId: id,
       title: stringValue(finding.title),
@@ -2276,7 +2285,7 @@ function reportLinkedFindingRow(row: Record<string, unknown>): Record<string, un
 }
 
 function latestPrepareRequiresRealTargetConfirmation(runs: Array<Record<string, unknown>>): boolean {
-  const run = runs.find((entry) => entry.kind === "prepare" && typeof entry.run_dir === "string");
+  const run = runs.find((entry) => isSuccessfulPrepareRun(entry) && typeof entry.run_dir === "string");
   const manifest = run ? readPrepareManifestObject(run) : undefined;
   const realTarget = summarizePrepareRealTarget(manifest?.real_target ?? manifest?.realTarget);
   return !(realTarget.reported && realTarget.requiresConfirmation === false);
@@ -2303,7 +2312,7 @@ function applyPreparedWorkspaceIfNeeded(spec: LaunchSpec, runs: Array<Record<str
 }
 
 function latestPreparedWorkspace(runs: Array<Record<string, unknown>>): { workspaceDir: string; manifestPath: string; scopeNote?: string } | undefined {
-  const run = runs.find((entry) => entry.kind === "prepare" && typeof entry.run_dir === "string");
+  const run = runs.find((entry) => isSuccessfulPrepareRun(entry) && typeof entry.run_dir === "string");
   if (!run) return undefined;
   const runDir = path.resolve(String(run.run_dir));
   const workspaceDir = path.join(runDir, "prepare", "workspace");
