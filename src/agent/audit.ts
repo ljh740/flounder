@@ -21,6 +21,18 @@ import type { RunKind } from "../db/store.js";
 import { isPiSessionProvider, runAuditSession, SessionLlmClient } from "./pi-session.js";
 import type { TranscriptStep } from "./prompts.js";
 import { buildTools, clearScratchFindings, dedupeFindings, ingestFindingsFromScratch, newSession, readScratchScopes, type AgentFinding, type AgentSession, type AuditScope, type ToolContext } from "./tools.js";
+import {
+  COVERAGE_GAPS_FILE,
+  FOLLOWUP_SCOPES_FILE,
+  RESOURCE_REQUESTS_FILE,
+  RUN_HEALTH_FILE,
+  buildRunHealth,
+  mergeFollowupScopes,
+  readDiscoveryArtifacts,
+  type CoverageGap,
+  type ResourceRequest,
+  type RunHealth,
+} from "./discovery-artifacts.js";
 
 // Orchestrates one autonomous audit: load authorized material, give the model the
 // capability surface, run the ReAct loop, then turn whatever it proved into the
@@ -177,6 +189,7 @@ export async function runAudit(
 
   let steps: TranscriptStep[];
   let stoppedReason: string;
+  let auditMode: "breadth" | "map" | "map-dig" | "verify" | "dig" = "breadth";
   let manualFindings = false;
   let scopeInventory: AuditScope[] = [];
   // SQLite tracking: record the project + a running run, then update scope coverage,
@@ -188,6 +201,7 @@ export async function runAudit(
   let digDifferentialDone = false;
 
   if (cfg.auditVerify) {
+    auditMode = "verify";
     // VERIFY posture: confirm-or-refute existing suspected finding(s) by execution.
     // Skips map/dig enumeration; for each finding it runs a focused session seeded
     // with the claim ("write a PoC that triggers it, or refute it"), routed through
@@ -251,6 +265,7 @@ export async function runAudit(
     steps = aggregatedSteps;
     stoppedReason = phaseFailureReason ?? "finished";
   } else if (cfg.auditMapOnly) {
+    auditMode = "map";
     // MAP only (`flounder map`): enumerate and persist the scope inventory, then stop — no
     // dig. The resumable `flounder audit` digs from this inventory afterwards.
     const inventoryDir = projectHistoryDir(historyLocation(cfg));
@@ -269,6 +284,7 @@ export async function runAudit(
     steps = mapPhase.steps;
     stoppedReason = phaseFailureReason ?? "finished";
   } else if (cfg.auditDeep && !cfg.auditDeepFocus) {
+    auditMode = "map-dig";
     // MAP → DIG, resumable. The complete scope inventory is persisted under the
     // project history dir; each run deep-audits the next batch of un-audited
     // scopes and updates their status. Re-running the same command therefore
@@ -519,6 +535,7 @@ export async function runAudit(
   } else {
     // Single run: breadth (default role) or a pinned deep-focus dig (dig role).
     const pinned = Boolean(cfg.auditDeep && cfg.auditDeepFocus);
+    auditMode = pinned ? "dig" : "breadth";
     const result = await runPhase(withRole(cfg, pinned ? "dig" : "default"), {
       mode: pinned ? "dig" : "breadth",
       ...(cfg.auditDeepFocus ? { deepFocus: cfg.auditDeepFocus } : {}),
@@ -532,6 +549,33 @@ export async function runAudit(
   if (findingParse.errors.length > 0) {
     await logger.artifact("audit_findings_errors.json", findingParse.errors);
     await logger.event("audit_findings_parse_errors", { errors: findingParse.errors.length });
+  }
+
+  const discoveryArtifacts = readDiscoveryArtifacts(session);
+  let coverageGaps: CoverageGap[] = discoveryArtifacts.coverageGaps;
+  let resourceRequests: ResourceRequest[] = discoveryArtifacts.resourceRequests;
+  let followupScopes: AuditScope[] = discoveryArtifacts.followupScopes;
+  if (followupScopes.length > 0) {
+    const merged = mergeFollowupScopes(scopeInventory, followupScopes);
+    scopeInventory = merged.scopes;
+    if (merged.added > 0) {
+      const inventoryDir = projectHistoryDir(historyLocation(cfg));
+      await saveScopeInventory(inventoryDir, scopeInventory);
+      recorder.scopes(scopeInventory);
+      await logger.event("audit_followup_scopes_added", { proposed: followupScopes.length, added: merged.added });
+    }
+  }
+  if (coverageGaps.length > 0) {
+    await logger.artifact(COVERAGE_GAPS_FILE, coverageGaps);
+    recorder.stage("coverage-gaps", { open: coverageGaps.filter((gap) => gap.status !== "resolved").length, total: coverageGaps.length });
+  }
+  if (resourceRequests.length > 0) {
+    await logger.artifact(RESOURCE_REQUESTS_FILE, resourceRequests);
+    recorder.stage("resource-requests", { open: resourceRequests.filter((request) => request.status !== "resolved").length, total: resourceRequests.length });
+  }
+  if (followupScopes.length > 0) {
+    await logger.artifact(FOLLOWUP_SCOPES_FILE, followupScopes);
+    recorder.stage("followup-scopes", { proposed: followupScopes.length, pending: followupScopes.length });
   }
 
   // Differential confirmation: for confirmed-executable findings that declared a
@@ -686,11 +730,27 @@ export async function runAudit(
   // findings — that is the whole point of the confirmation gate.
   const confirmed = session.findings.filter((finding) => isConfirmed(finding.confirmationStatus));
   const hypotheses = session.findings.filter((finding) => !isConfirmed(finding.confirmationStatus));
+  const runHealth: RunHealth = buildRunHealth({
+    stoppedReason,
+    steps,
+    commandRuns: session.commandRuns,
+    scopes: scopeInventory,
+    confirmed,
+    hypotheses,
+    coverageGaps,
+    resourceRequests,
+    followupScopes,
+    findingParseErrors: findingParse.errors.length,
+    mode: auditMode,
+  });
+  await logger.artifact(RUN_HEALTH_FILE, runHealth);
+  recorder.stage("run-health", { status: runHealth.status, ...runHealth.signals });
 
   await logger.artifact("audit_transcript.json", { stoppedReason, steps });
   await logger.artifact("audit_findings.json", confirmed);
   await logger.artifact("audit_hypotheses.json", hypotheses);
   await logger.artifact("audit_command_runs.json", session.commandRuns);
+  if (scopeInventory.length > 0) await logger.artifact("audit_scopes.json", scopeInventory);
 
   const summary = buildSummary(confirmed, hypotheses, steps);
   await logger.artifact("summary.json", summary);
@@ -705,7 +765,19 @@ export async function runAudit(
   // (including concurrent ones).
   await logger.artifact(
     "audit_report.md",
-    renderRunReport({ target: cfg.targetName, provider: cfg.provider, model: cfg.auditModel, confirmed, hypotheses, scopes: scopeInventory, reportName: reportArtifactName }),
+    renderRunReport({
+      target: cfg.targetName,
+      provider: cfg.provider,
+      model: cfg.auditModel,
+      confirmed,
+      hypotheses,
+      scopes: scopeInventory,
+      reportName: reportArtifactName,
+      coverageGaps,
+      resourceRequests,
+      followupScopes,
+      runHealth,
+    }),
   );
 
   await nonFatalAuditMaintenance(logger, "finding_memory", () => persistFindingMemory(memory, confirmed, hypotheses));
@@ -717,6 +789,10 @@ export async function runAudit(
     hypotheses: hypotheses.length,
     confirmedExecutable: confirmed.length,
     commandRuns: session.commandRuns.length,
+    runHealth: runHealth.status,
+    coverageGaps: coverageGaps.length,
+    resourceRequests: resourceRequests.length,
+    followupScopes: followupScopes.length,
     finishSummary: session.finishSummary ?? "",
   });
   await nonFatalAuditMaintenance(logger, "last_run_pointer_finish", () => writeLastRunPointer(path.dirname(logger.runDir), logger.runDir, cfg.targetName));
@@ -764,6 +840,10 @@ function renderRunReport(input: {
   hypotheses: AgentFinding[];
   scopes: AuditScope[];
   reportName: (id: string) => string;
+  coverageGaps?: CoverageGap[];
+  resourceRequests?: ResourceRequest[];
+  followupScopes?: AuditScope[];
+  runHealth?: RunHealth;
 }): string {
   const clip = (text: string | undefined, max: number): string => {
     const cleaned = (text ?? "").replace(/\s+/g, " ").trim();
@@ -783,10 +863,14 @@ function renderRunReport(input: {
   out.push(`- Provider / model: ${input.provider} / ${input.model}`);
   out.push(`- Confirmed findings: ${input.confirmed.length}${input.confirmed.length ? ` (${sevCounts(input.confirmed)})` : ""}`);
   out.push(`- Hypotheses (suspected, unconfirmed): ${input.hypotheses.length}`);
+  if (input.runHealth) out.push(`- Run health: ${input.runHealth.status} — ${input.runHealth.reasons.join("; ")}`);
   if (input.scopes.length > 0) {
     const pending = input.scopes.length - audited;
     out.push(`- Scope coverage: audited ${audited} / ${input.scopes.length}${pending > 0 ? `, ${pending} pending (re-run to continue)` : ""}`);
   }
+  if ((input.coverageGaps?.length ?? 0) > 0) out.push(`- Coverage gaps: ${input.coverageGaps?.length}`);
+  if ((input.resourceRequests?.length ?? 0) > 0) out.push(`- Resource requests: ${input.resourceRequests?.length}`);
+  if ((input.followupScopes?.length ?? 0) > 0) out.push(`- Follow-up scopes proposed: ${input.followupScopes?.length}`);
   out.push("");
 
   out.push(`## Confirmed findings (${input.confirmed.length})`, "");
@@ -813,6 +897,20 @@ function renderRunReport(input: {
     out.push("## Scope coverage", "");
     for (const scope of [...input.scopes].sort((a, b) => (b.score || 0) - (a.score || 0))) {
       out.push(`- \`${(scope.status ?? "pending").padEnd(8)}\` score ${scope.score} — ${scope.region} — ${clip(scope.obligation, 90)}`);
+    }
+    out.push("");
+  }
+
+  if ((input.coverageGaps?.length ?? 0) > 0 || (input.resourceRequests?.length ?? 0) > 0 || (input.followupScopes?.length ?? 0) > 0) {
+    out.push("## Discovery backlog", "");
+    for (const gap of input.coverageGaps ?? []) {
+      out.push(`- Coverage gap${gap.scopeId ? ` (${gap.scopeId})` : ""}: ${clip(gap.obligation, 120)} — ${clip(gap.reason, 180)}`);
+    }
+    for (const request of input.resourceRequests ?? []) {
+      out.push(`- Resource request [${request.kind}]: ${clip(request.needed, 120)} — ${clip(request.reason, 180)}`);
+    }
+    for (const scope of input.followupScopes ?? []) {
+      out.push(`- Follow-up scope: ${scope.region} — ${clip(scope.obligation, 120)}`);
     }
     out.push("");
   }

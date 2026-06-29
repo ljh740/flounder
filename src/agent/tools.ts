@@ -66,6 +66,7 @@ export interface AgentFinding {
 
 export interface CommandRunRecord {
   id: string;
+  purpose?: "inspect" | "build" | "confirm";
   passed: boolean;
   targetLinked?: boolean;
   targetLinkReason?: string;
@@ -375,6 +376,7 @@ const bashTool: AgentTool = {
       && patternCheck.matched.length > 0;
     const record: CommandRunRecord = {
       id: runId,
+      purpose: normalized.purpose,
       passed,
       targetLinked: targetLink.linked,
       targetLinkReason: targetLink.reason,
@@ -571,6 +573,9 @@ function commandOutputPreview(result: ReproductionCommandResult): string {
 export function isReportFile(normalizedPath: string): boolean {
   return normalizedPath === "findings.json"
     || normalizedPath === "scopes.json"
+    || normalizedPath === "coverage_gaps.json"
+    || normalizedPath === "resource_requests.json"
+    || normalizedPath === "followup_scopes.json"
     || normalizedPath === "prepare_manifest.json"
     || normalizedPath === "confirm_decision.json"
     || /^report_[a-z0-9_.-]+\.md$/.test(normalizedPath);
@@ -714,6 +719,8 @@ export interface AuditScope {
   status?: "pending" | "audited" | "deferred" | "auditing";
   digSeconds?: number; // how long this scope's deep-audit took (set when it completes)
   priority?: number; // manual dig-queue ordering (operator "↑ Top"); ordered above score, doesn't change score
+  parentScopeId?: string; // model-proposed follow-up provenance; not part of ranking semantics
+  source?: "map" | "followup" | "coverage-gap";
 }
 
 /** Non-mutating check: did the session write a non-empty findings.json to scratch?

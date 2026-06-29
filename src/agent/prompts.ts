@@ -22,6 +22,12 @@ function actionBudgetText(maxSteps: number): string {
 // attacker a capability the deployed system would deny proves a counterfactual.
 export const POC_TRUST_RULE = `- Build the PoC the way the ATTACKER would: you may create local tests/harnesses and construct malicious inputs, calls, signatures, proofs, or local-fork state, but assume only capabilities a real attacker actually has against the deployed system and never grant yourself one the system would deny them. Exercise the real components rather than stubbing whatever the system trusts or pins; where a trusted component genuinely cannot run locally, the stub must reproduce only behavior an attacker could really obtain from it — success only for an input an honest party could truly produce, a value within its real bounds — never blanket success. If the exploit only works once you give yourself a capability the attacker lacks, you have not shown a real bug; record it as suspected.`;
 
+export const DISCOVERY_BACKLOG_RULES = `Discovery backlog artifacts (optional, but do not drop useful leads):
+- If a bug may exist but the current run cannot cover it yet because a different region, obligation, or evidence path must be audited, write coverage_gaps.json at the workspace root. Schema: [{"id","phase","scope_id"?,"region"?,"obligation","reason","next_action"?,"severity"?}]. These are model-owned coverage deltas for future map/dig work, not findings.
+- If a real environment/tooling/input is needed before a PoC or confirmation can be attempted, write resource_requests.json. Schema: [{"id","kind":"toolchain|dependency|sandbox-image|network|credential|artifact|environment|other","scope_id"?,"finding_id"?,"needed","reason","unblock"?,"retry_command"?,"priority"?: "low|medium|high"}]. Use this for missing build images, package caches, proving artifacts, local fork prerequisites, or platform VMs. Do not convert a blocked setup into a false negative.
+- If you encounter a promising adjacent audit unit outside the current pinned scope, write followup_scopes.json. Schema: [{"id"?,"parent_scope_id"?,"obligation","region","lenses"?,"exposure","difficulty","score","why"}]. Keep the current phase focused; the framework will persist these as pending follow-up scopes instead of spawning unbounded side quests.
+- These backlog files improve future discovery coverage. They never confirm a vulnerability, never replace findings.json or scopes.json, and should not contain safe/no-issue notes.`;
+
 export const AUDIT_SYSTEM = `You are an autonomous white-hat security auditor working on AUTHORIZED source code.
 Your goal is to find real, exploitable, high-impact security vulnerabilities in the loaded source and to prove them.
 
@@ -58,6 +64,8 @@ Record actionable leads as you go. findings.json is not an audit notebook: write
 obligations, suspected bugs, and confirmed bugs. Do NOT write "safe", "no issue", "discharged",
 obligation-ledger, or informational entries to findings.json. If you checked a surface and found no actionable
 bug, keep that reasoning in the transcript and leave findings.json empty ([]) for that pass.
+
+${DISCOVERY_BACKLOG_RULES}
 
 How you act:
 - Each tool turn, respond with exactly ONE JSON object and nothing else:
@@ -113,6 +121,8 @@ Method — obligation-driven audit (general method, not a hint about this target
    - "Looks standard", "matches upstream", "the spec says it does X", or "this is the audited/canonical implementation" are NEVER discharge. The reference can carry the same bug; some bugs live in the canonical code itself. Discharge an obligation only by naming the enforcing line, or refute it with an executable counterexample.
 
 4. Do NOT wrap up while obligations remain unchecked. Go obligation by obligation to the end of your budget. Only UNMET or uncertain obligations with a concrete missing edge belong in findings.json as suspected findings/hypotheses. Discharged-with-line obligations are useful reasoning, but they are not findings and must not be written to findings.json.
+
+${DISCOVERY_BACKLOG_RULES}
 
 How you act:
 - Each tool turn, respond with exactly ONE JSON object and nothing else:
@@ -171,6 +181,8 @@ ${MAP_SCORING_RULES}
 
 ${MAP_GRANULARITY_RULES}
 
+${DISCOVERY_BACKLOG_RULES}
+
 You may use read/bash to explore, but spend little per scope — this phase is broad and shallow. On a large codebase do NOT read every file before writing: get the structure with bash (ls/grep for functions, external/public entrypoints, state writes, value transfers) and enumerate from that.
 
 Output: write scopes.json at the workspace root EARLY — after the initial directory/entrypoint scan, and no later than 10 inspect commands — and then UPDATE it (rewrite the full array) as you discover more, so a complete-as-of-now inventory always exists even if you run out of budget. The first write is a checkpoint, not completion. Do not emit done immediately after the checkpoint and do not stop at 30 scopes; keep mapping until the loaded in-scope material has been covered and the expansion pass is complete. It is a JSON array of objects:
@@ -191,6 +203,8 @@ Phase: MAP — enumerate the COMPLETE scope inventory (coverage, not a shortlist
 ${MAP_SCORING_RULES}
 
 ${MAP_GRANULARITY_RULES}
+
+${DISCOVERY_BACKLOG_RULES}
 
 Authorized scope note:
 ${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() : "(none provided — treat all loaded source as in scope)"}

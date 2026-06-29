@@ -85,6 +85,7 @@ Flounder is built for the parts of security work that usually require a human to
 | Exploit construction | Writes local PoCs, tests, fixtures, or harnesses inside an isolated workspace. |
 | Sandboxed execution | Runs model-generated tests and PoCs away from the host source tree, credentials, and user environment. |
 | Execution proof | Runs the proof locally and only upgrades findings when command evidence exists. |
+| Discovery health | Writes run-health and backlog artifacts so a zero-finding run can be distinguished from a shallow run, a missing-resource blocker, or coverage that still needs a later dig. |
 | Real-target confirmation | Reproduces confirmed findings against real-world ground truth, such as a local fork of a deployed target. |
 | Reporting | Tracks status, artifacts, confirm decisions, formal reports, and submission state across projects. |
 

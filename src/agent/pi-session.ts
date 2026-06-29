@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { LlmClient } from "../types.js";
-import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, MAP_GRANULARITY_RULES, MAP_SCORING_RULES, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
+import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SCORING_RULES, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
 import { describeAction, readScratchScopes, scratchHasFindings, scratchHasFindingsArtifact, type AgentTool, type ToolContext } from "./tools.js";
 import { flounderAgentDir } from "../provider-auth.js";
 
@@ -607,6 +607,8 @@ ${POC_TRUST_RULE}
 
 Trust boundaries (do not lose a real bug just because its proof lives outside this source):
 - If a security property's correctness depends on a component NOT in the loaded source — a ZK circuit / verification key, an oracle, a proxy/upgradeable implementation, an external contract's semantics, or an off-chain service — do NOT assume that component enforces what the in-scope code trusts it to, and do NOT drop the concern just because no in-scope confirm test can reach it. The in-scope code "correctly trusting the proof/oracle/impl" is exactly where such bugs hide. Record it as a "suspected" finding that names the trusted assumption, the exact line relying on it, the attacker impact if the assumption fails, and what is needed to settle it (e.g. "needs the circuit/VK to confirm"). A surfaced cross-boundary suspicion beats a silently dropped real bug.
+
+${DISCOVERY_BACKLOG_RULES}
 `;
   return `${intro}
 
@@ -832,6 +834,8 @@ Do not judge importance by gut feel or "looks like a bug". A region whose link t
 ${MAP_SCORING_RULES}
 
 ${MAP_GRANULARITY_RULES}
+
+${DISCOVERY_BACKLOG_RULES}
 
 Write scopes.json at the workspace root EARLY — after the initial directory/entrypoint scan, and no later than 10 inspect commands — then UPDATE it (rewrite the full array) as you find more, so a complete-as-of-now inventory survives if you run out of budget. The first write is a checkpoint, not completion. Do not stop at 30 scopes or any dig-batch cap; those caps apply only after mapping. It is a JSON array of {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"}. On a large codebase do NOT read every file first — use bash (ls/grep for public/external entrypoints, state writes, value transfers) to enumerate, and spend little per scope (broad and shallow). Before done, make a final expansion pass over the first-party tree, split broad scopes, update scopes.json, and only then stop. You CANNOT modify the target source.`;
 }

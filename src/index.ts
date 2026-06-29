@@ -5,6 +5,7 @@
 export * from "./agent/audit.js";
 export * from "./agent/confirm.js";
 export * from "./agent/consolidate.js";
+export * from "./agent/discovery-artifacts.js";
 export * from "./agent/loop.js";
 export * from "./agent/memory.js";
 export * from "./agent/pi-session.js";

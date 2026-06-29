@@ -7,7 +7,8 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
-import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, scratchHasFindings, scratchHasFindingsArtifact } from "../dist/agent/tools.js";
+import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact } from "../dist/agent/tools.js";
+import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
@@ -188,6 +189,110 @@ test("readScratchScopes accepts scope/spec/value/input map schema", () => {
   assert.equal(scopes[0].obligation, "Spec: The proof input must bind the committed root. Value at risk: Invalid proofs could release escrowed funds. Inputs/trust boundary: Proof bytes, public input, committed root.");
   assert.equal(scopes[0].score, 100);
   assert.equal(scopes[1].score, 20);
+});
+
+test("discovery backlog artifacts parse and merge without becoming findings", () => {
+  const session = newSession();
+  session.scratchFiles.set("coverage_gaps.json", JSON.stringify({
+    coverage_gaps: [
+      {
+        id: "G1",
+        scope_id: "S1",
+        region: "src/Vault.sol:10-80",
+        obligation: "Withdrawal authorization must bind signer to recipient.",
+        reason: "The dig found the sink but did not audit the signature domain separator.",
+        next_action: "Deep-audit the signature construction and caller path.",
+      },
+    ],
+  }));
+  session.scratchFiles.set("dig-S1/resource_requests.json", JSON.stringify([
+    {
+      id: "R1",
+      kind: "sandbox-image",
+      scope_id: "S1",
+      needed: "Foundry image with solc 0.7.6",
+      reason: "The native tests cannot compile in the baseline sandbox.",
+      unblock: "Run the PoC against the project test suite.",
+      priority: "high",
+    },
+  ]));
+  session.scratchFiles.set("dig-S1/followup_scopes.json", JSON.stringify({
+    followup_scopes: [
+      {
+        parent_scope_id: "S1",
+        obligation: "Domain separator construction must bind chain and verifying contract.",
+        region: "src/Permit.sol:40-95",
+        lenses: ["spec", "unbound-input"],
+        exposure: "high",
+        difficulty: "medium",
+        score: 8,
+        why: "An adjacent authorization precondition gates the withdrawal sink.",
+      },
+    ],
+  }));
+
+  const gaps = readScratchCoverageGaps(session);
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0].scopeId, "S1");
+  assert.match(gaps[0].nextAction, /Deep-audit/);
+
+  const resources = readScratchResourceRequests(session);
+  assert.equal(resources.length, 1);
+  assert.equal(resources[0].kind, "sandbox-image");
+  assert.equal(resources[0].priority, "high");
+
+  const followups = readScratchFollowupScopes(session);
+  assert.equal(followups.length, 1);
+  assert.equal(followups[0].parentScopeId, "S1");
+  assert.equal(followups[0].source, "followup");
+
+  const merged = mergeFollowupScopes([
+    {
+      id: "S1",
+      obligation: "Withdrawal sink must enforce authorization.",
+      region: "src/Vault.sol:10-80",
+      lenses: ["value-flow"],
+      exposure: "critical",
+      difficulty: "high",
+      score: 10,
+      why: "Funds leave the system.",
+      status: "audited",
+    },
+  ], followups);
+  assert.equal(merged.added, 1);
+  assert.equal(merged.scopes.length, 2);
+  assert.equal(merged.scopes[1].status, "pending");
+
+  assert.equal(isReportFile("coverage_gaps.json"), true);
+  assert.equal(isReportFile("resource_requests.json"), true);
+  assert.equal(isReportFile("followup_scopes.json"), true);
+});
+
+test("run health distinguishes blocked, shallow, and coverage-incomplete runs", () => {
+  const base = {
+    stoppedReason: "finished",
+    steps: [{ tool: "read" }, { tool: "bash" }, { tool: "write" }, { tool: "read" }],
+    commandRuns: [],
+    scopes: [],
+    confirmed: [],
+    hypotheses: [],
+    coverageGaps: [],
+    resourceRequests: [],
+    followupScopes: [],
+    mode: "breadth",
+  };
+
+  assert.equal(buildRunHealth(base).status, "healthy");
+  assert.equal(buildRunHealth({ ...base, steps: [{ tool: "read" }], mode: "map" }).status, "shallow");
+  assert.equal(buildRunHealth({
+    ...base,
+    resourceRequests: [{ id: "R1", status: "open", kind: "environment", needed: "FreeBSD VM", reason: "PoC needs platform-specific socket behavior" }],
+  }).status, "needs-resource");
+  assert.equal(buildRunHealth({
+    ...base,
+    coverageGaps: [{ id: "G1", status: "open", obligation: "Parser length must bind payload bytes", reason: "Budget ended before parser sink was audited" }],
+  }).status, "needs-coverage");
+  assert.equal(buildRunHealth({ ...base, stoppedReason: "error" }).status, "infra-failed");
 });
 
 test("prepare checkpoint guard blocks optional work after source is staged but manifest components are empty", () => {

@@ -162,6 +162,10 @@ Each audit writes:
 - `audit_transcript.json`: action/observation replay.
 - `audit_findings.json`: execution-confirmed findings only.
 - `audit_hypotheses.json`: unconfirmed candidates.
+- `run_health.json`: framework-owned health classification (`healthy`, `needs-coverage`, `needs-resource`, `shallow`, or `infra-failed`) derived from objective run signals.
+- `coverage_gaps.json`: model-owned coverage deltas for obligations or evidence paths that need a later map/dig pass.
+- `resource_requests.json`: model-owned environment/tooling/artifact blockers that prevent deeper exploration or confirmation.
+- `followup_scopes.json`: model-owned adjacent scope proposals; the framework persists accepted proposals as pending scope-inventory entries instead of spawning unbounded side quests.
 - `audit_command_runs.json`: sandboxed local command records.
 - `audit_prepare.json`: toolchain warm-up results (when a manifest was detected).
 - `summary.json`: ranked summary (findings) with `coverage.hypotheses`.
@@ -171,6 +175,8 @@ Each audit writes:
 Each `flounder confirm` writes `confirm_provenance.json` (frozen findings' fingerprints), `confirm_decision.json` + `confirm_report.md` (the decision sheet), `confirm_equivalence.json` (the fix-equivalence matrix and clusters), and the usual `confirm_transcript.json` / `events.jsonl` / `calls/*.json` session trace.
 
 Per-target memory lives at `<out>/history/<target>/memory.jsonl`. Audit surfaces recent memory at kickoff and automatically stores parsed findings for later runs.
+
+The discovery backlog files are intentionally not findings and not a framework-owned search strategy. They are narrow affordances: the model records what it could not cover, what resource would unblock proof, or what adjacent scope should be audited later; the framework validates/parses them, saves them as artifacts, surfaces counts through the existing stage funnel, and keeps follow-up scopes pending for future coverage.
 
 Project history lives under `<out>/history/<target>/manifest.json` and records sanitized run metadata, findings, and materials. Paths must stay repository-relative or placeholder-based in public-facing artifacts.
 
