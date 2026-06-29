@@ -7,7 +7,7 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
-import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes } from "../dist/agent/tools.js";
+import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, scratchHasFindings, scratchHasFindingsArtifact } from "../dist/agent/tools.js";
 import { runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
@@ -17,7 +17,7 @@ import { runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
-import { buildSessionPrompt, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas } from "../dist/agent/pi-session.js";
+import { buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 import { renderDisclosure } from "../dist/reports/disclosure.js";
@@ -323,6 +323,40 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   const confirmKickoff = buildConfirmKickoff({ target: "t", tools: [], fileManifest: "x.rs", maxSteps: Number.POSITIVE_INFINITY, confirm: "[]" });
   assert.ok(confirmKickoff.includes("write only the decision sheet"), "confirm kickoff should frame Confirm as decision-only");
   assert.ok(confirmKickoff.includes("Do not write report_*.md"), "confirm kickoff should reserve formal reports for Report");
+});
+
+test("pi session resource loader isolates audits from host agent context", () => {
+  const loader = createIsolatedResourceLoader("Mode-specific rules.");
+  assert.deepEqual(loader.getSkills(), { skills: [], diagnostics: [] });
+  assert.deepEqual(loader.getPrompts(), { prompts: [], diagnostics: [] });
+  assert.deepEqual(loader.getAgentsFiles(), { agentsFiles: [] });
+  assert.deepEqual(loader.getAppendSystemPrompt(), []);
+  assert.equal(loader.getExtensions().extensions.length, 0);
+  const prompt = loader.getSystemPrompt();
+  assert.ok(prompt.includes("Flounder's isolated audit worker"));
+  assert.ok(prompt.includes("Mode-specific rules."));
+  assert.ok(prompt.includes("Do not load, apply, or ask for host agent instructions"));
+  assert.ok(prompt.includes("SKILL.md"));
+  assert.ok(prompt.includes("~/.codex"));
+});
+
+test("empty findings.json is a completed artifact, not a forced-finalize miss", () => {
+  const clean = newSession();
+  clean.scratchFiles.set("findings.json", "[]");
+  assert.equal(scratchHasFindingsArtifact(clean), true);
+  assert.equal(scratchHasFindings(clean), false);
+
+  const wrapped = newSession();
+  wrapped.scratchFiles.set("findings.json", "{\"findings\":[]}");
+  assert.equal(scratchHasFindingsArtifact(wrapped), true);
+  assert.equal(scratchHasFindings(wrapped), false);
+
+  const missing = newSession();
+  assert.equal(scratchHasFindingsArtifact(missing), false);
+
+  const invalid = newSession();
+  invalid.scratchFiles.set("findings.json", "{");
+  assert.equal(scratchHasFindingsArtifact(invalid), false);
 });
 
 test("stage_package_source stages a crates.io package with checksum-verified provenance", async () => {

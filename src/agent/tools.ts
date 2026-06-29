@@ -736,6 +736,20 @@ export function scratchHasFindings(session: AgentSession): boolean {
   }
 }
 
+/** Non-mutating check: did the session persist a syntactically valid findings.json,
+ *  even if it is the clean-audit sentinel []? Used to avoid forced-finalize loops
+ *  after a model already wrote the required empty artifact. */
+export function scratchHasFindingsArtifact(session: AgentSession): boolean {
+  const entry = scratchReportEntry(session, "findings.json");
+  if (!entry) return false;
+  try {
+    const raw: unknown = JSON.parse(entry.content);
+    return Array.isArray(raw) || Boolean(raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).findings));
+  } catch {
+    return false;
+  }
+}
+
 /** Parse the map phase's scopes.json from scratch (sorted by score, highest first). */
 export function readScratchScopes(session: AgentSession): AuditScope[] {
   const entry = scratchReportEntry(session, "scopes.json");
